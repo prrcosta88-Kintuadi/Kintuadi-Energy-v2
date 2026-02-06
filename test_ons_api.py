@@ -176,6 +176,33 @@ OPEN_DATASETS = [
 ]
 
 EXPECTED_API_DISABLE_MESSAGE = "API desabilitada"
+ENERGIA_AGORA_ENDPOINTS = [
+    "Geracao_SIN_Eolica_json",
+    "Geracao_SIN_Hidraulica_json",
+    "Geracao_SIN_Nuclear_json",
+    "Geracao_SIN_Solar_json",
+    "Geracao_SIN_Termica_json",
+    "Geracao_Norte_Eolica_json",
+    "Geracao_Norte_Hidraulica_json",
+    "Geracao_Norte_Nuclear_json",
+    "Geracao_Norte_Solar_json",
+    "Geracao_Norte_Termica_json",
+    "Geracao_Nordeste_Eolica_json",
+    "Geracao_Nordeste_Hidraulica_json",
+    "Geracao_Nordeste_Nuclear_json",
+    "Geracao_Nordeste_Solar_json",
+    "Geracao_Nordeste_Termica_json",
+    "Geracao_Sudeste_Eolica_json",
+    "Geracao_Sudeste_Hidraulica_json",
+    "Geracao_Sudeste_Nuclear_json",
+    "Geracao_Sudeste_Solar_json",
+    "Geracao_Sudeste_Termica_json",
+    "Geracao_Sul_Eolica_json",
+    "Geracao_Sul_Hidraulica_json",
+    "Geracao_Sul_Nuclear_json",
+    "Geracao_Sul_Solar_json",
+    "Geracao_Sul_Termica_json",
+]
 
 
 @dataclass(frozen=True)
@@ -384,6 +411,36 @@ def test_open_data_sources() -> None:
         print(f"{status} {name}: {details}")
 
 
+def test_energia_agora() -> None:
+    print("\n3. ⚡ Testando API Energia Agora (geração)...")
+    base_url = f"{API_BASE_URL}/energiaagora/Get"
+    headers = {"accept": "application/json"}
+    for endpoint in ENERGIA_AGORA_ENDPOINTS:
+        url = f"{base_url}/{endpoint}"
+        try:
+            response = requests.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
+        except requests.RequestException as exc:
+            print(f"❌ {endpoint}: erro de conexão: {exc}")
+            continue
+
+        if response.status_code != 200:
+            print(f"❌ {endpoint}: HTTP {response.status_code}")
+            print(f"   Resposta: {response.text[:200]}")
+            continue
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            print(f"❌ {endpoint}: resposta JSON inválida: {exc}")
+            continue
+
+        if isinstance(payload, list):
+            preview = payload[:3]
+            print(f"✅ {endpoint}: {len(payload)} registros. Exemplo: {preview}")
+        else:
+            print(f"⚠️ {endpoint}: resposta inesperada ({type(payload)})")
+
+
 def test_ons_api_direct() -> None:
     """Testa as APIs do ONS para verificar saúde e exemplos de dados."""
 
@@ -409,7 +466,9 @@ def test_ons_api_direct() -> None:
     print("\n2. 📋 Testando listagem de reservatórios...")
     reservatorios = test_reservatorios(headers)
 
-    print("\n3. 📊 Testando volume útil histórico...")
+    test_energia_agora()
+
+    print("\n4. 📊 Testando volume útil histórico...")
     reservatorio_id = "10"
     if reservatorios and isinstance(reservatorios[0], dict):
         reservatorio_id = str(reservatorios[0].get("id") or reservatorio_id)
