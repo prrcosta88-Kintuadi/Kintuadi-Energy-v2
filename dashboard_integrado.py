@@ -8,6 +8,14 @@ import os
 import glob
 import logging
 
+from scripts.core_analysis import build_core_analysis
+from scripts.premium_module import (
+    build_pld_lookup,
+    build_premium_summary,
+    calculate_exposures,
+    load_premium_excel,
+)
+
 # Configura logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -214,6 +222,38 @@ def get_fallback_data():
         'metadata': {'timestamp': 'N/A', 'status': 'error'}
     }
 
+
+def build_core_section(raw_data):
+    """Gera análises CORE com base em dados ONS + CCEE."""
+    if not raw_data:
+        return build_core_analysis({})
+    return build_core_analysis(raw_data)
+
+
+def load_premium_from_upload(uploaded_file, raw_data):
+    """Carrega dados PREMIUM via Excel e calcula exposições."""
+    if uploaded_file is None:
+        return None
+
+    try:
+        user_df = load_premium_excel(uploaded_file)
+    except Exception as exc:
+        st.error(f"Erro ao ler o Excel PREMIUM: {exc}")
+        return None
+
+    ccee_records = []
+    if raw_data:
+        ccee_records = raw_data.get("ccee", {}).get("data", [])
+        if not ccee_records and "sources" in raw_data:
+            ccee_records = raw_data.get("sources", {}).get("ccee", {}).get("data", [])
+
+    if not ccee_records:
+        st.warning("PLD horário não encontrado. Exposição financeira será calculada com PLD zero.")
+
+    pld_lookup = build_pld_lookup(ccee_records)
+    exposure_df = calculate_exposures(user_df, pld_lookup)
+    return build_premium_summary(exposure_df)
+
 def create_gauge_chart(value, title, min_val=0, max_val=100):
     """Cria gráfico de gauge"""
     fig = go.Figure(go.Indicator(
@@ -277,10 +317,21 @@ def main():
         
         if st.button("🔍 Ver Logs", use_container_width=True):
             st.info("Verifique: logs/kintuadi.log")
+
+        st.divider()
+        st.subheader("👤 PREMIUM")
+        st.caption("Importe o template Excel para análises personalizadas.")
+        premium_file = st.file_uploader(
+            "Template Excel (dados_usuario)",
+            type=["xlsx"],
+            accept_multiple_files=False,
+        )
     
     # Carrega e processa dados
     raw_data = load_latest_data()
     data = extract_data_for_display(raw_data)
+    core_analysis = build_core_section(raw_data or {})
+    premium_result = load_premium_from_upload(premium_file, raw_data)
     
     # Se não tem dados, mostra mensagem clara
     if not raw_data or raw_data.get('metadata', {}).get('status') == 'error':
@@ -500,6 +551,85 @@ def main():
                 - Momento para migração ao ACL
                 - Manter estratégia atual
                 """)
+
+    # CORE - análise sistêmica
+    st.markdown("---")
+    st.header("🌐 CORE — Visão Sistêmica do SIN")
+    hydrology = core_analysis.get("hydrology", {})
+    prices = core_analysis.get("prices", {})
+    alerts = core_analysis.get("alerts", [])
+
+    col_core_1, col_core_2, col_core_3 = st.columns(3)
+    with col_core_1:
+        st.subheader("💧 Hidrologia")
+        st.write(f"Volume médio: {hydrology.get('volume_medio', 'N/A')}")
+        conforto = hydrology.get("conforto_hidrico", {})
+        st.write(f"Conforto hídrico: {conforto.get('classe', 'N/A')}")
+        st.caption(conforto.get("descricao", ""))
+
+    with col_core_2:
+        st.subheader("💰 Preços (PLD)")
+        st.write(f"PLD médio: {prices.get('pld_medio', 'N/A')}")
+        st.write(f"Volatilidade: {prices.get('pld_volatilidade', 'N/A')}")
+        coerencia = prices.get("coerencia_fundamentos", {})
+        st.write(f"Coerência: {coerencia.get('coerencia', 'N/A')}")
+        st.caption(coerencia.get("descricao", ""))
+
+    with col_core_3:
+        st.subheader("🚨 Alertas estruturais")
+        if alerts:
+            for alert in alerts:
+                st.warning(alert)
+        else:
+            st.success("Sem alertas estruturais no CORE.")
+
+    if prices.get("timeseries"):
+        st.subheader("📉 Série temporal do PLD (CORE)")
+        ts = prices.get("timeseries", [])
+        df_ts = pd.DataFrame(ts)
+        if not df_ts.empty:
+            fig_core = go.Figure(
+                data=go.Scatter(
+                    x=df_ts["data"],
+                    y=df_ts["pld_medio"],
+                    mode="lines+markers",
+                    line=dict(color="#00b4d8", width=2),
+                )
+            )
+            fig_core.update_layout(
+                height=300,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font={"color": "white"},
+                xaxis_title="Data",
+                yaxis_title="R$/MWh",
+                yaxis=dict(tickprefix="R$ "),
+            )
+            st.plotly_chart(fig_core, use_container_width=True)
+
+    # PREMIUM - análise personalizada
+    st.markdown("---")
+    st.header("👤 PREMIUM — Visão Personalizada")
+    if premium_result is None:
+        st.info("Envie o template Excel no sidebar para ativar a visão PREMIUM.")
+    else:
+        resumo = premium_result.resumo
+        col_p1, col_p2, col_p3 = st.columns(3)
+        with col_p1:
+            st.metric("Exposição energética (MWh)", f"{resumo.get('total_exposicao_mwh', 0):,.2f}")
+        with col_p2:
+            st.metric("Exposição financeira (R$)", f"{resumo.get('total_exposicao_financeira', 0):,.2f}")
+        with col_p3:
+            st.metric("Underhedge", resumo.get("linhas_underhedge", 0))
+
+        if premium_result.alertas:
+            for alert in premium_result.alertas:
+                st.warning(alert)
+
+        df_exposure = premium_result.data.copy()
+        if not df_exposure.empty:
+            st.subheader("📌 Exposição horária (amostra)")
+            st.dataframe(df_exposure.head(10), use_container_width=True)
     
     # Rodapé
     st.markdown("---")
