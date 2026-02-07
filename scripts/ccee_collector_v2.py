@@ -182,7 +182,7 @@ class CCEEPLDCollector:
             return {"success": False, "error": "CSV url ausente", "records": []}
 
         try:
-            df = pd.read_csv(csv_url, nrows=limit)
+            df = pd.read_csv(csv_url, nrows=limit, encoding="latin1", on_bad_lines="skip")
         except Exception as exc:
             logger.error(f"CCEE: Erro ao ler CSV {resource_id}: {exc}")
             return {"success": False, "error": str(exc), "records": []}

@@ -311,7 +311,13 @@ class ONSReservoirCollector:
         if not csv_url:
             return {"success": False, "error": "CSV url ausente", "records": []}
         try:
-            df = pd.read_csv(csv_url, nrows=limit)
+            df = pd.read_csv(
+                csv_url,
+                nrows=limit,
+                sep=";",
+                encoding="latin1",
+                on_bad_lines="skip",
+            )
         except Exception as exc:
             logger.error(f"Erro ao ler CSV ONS {dataset.get('name')}: {exc}")
             return {"success": False, "error": str(exc), "records": []}
@@ -472,22 +478,29 @@ class ONSReservoirCollector:
             return {}
         
         volumes = [r.volume_percentual for r in reservoirs if r.volume_percentual > 0]
+        volume_utils = [r.volume_util for r in reservoirs if r.volume_util > 0]
         
         if not volumes:
             return {}
         
         df = pd.Series(volumes)
+        volume_medio_ponderado = self._calculate_weighted_volume_medio(reservoirs)
+        volume_util_total = sum(volume_utils)
+        volume_medio_base = volume_medio_ponderado if volume_medio_ponderado is not None else float(df.mean())
         
         # Estatísticas detalhadas
         stats = {
             "geral": {
-                "volume_medio": float(df.mean()),
+                "volume_medio": float(volume_medio_base),
+                "volume_medio_simples": float(df.mean()),
+                "volume_medio_ponderado": float(volume_medio_ponderado) if volume_medio_ponderado is not None else None,
+                "volume_util_total": float(volume_util_total) if volume_util_total > 0 else None,
                 "volume_min": float(df.min()),
                 "volume_max": float(df.max()),
                 "volume_std": float(df.std()),
                 "volume_mediana": float(df.median()),
                 "total_reservatorios": len(reservoirs),
-                "status_sistema": self._determine_system_status(df.mean()),
+                "status_sistema": self._determine_system_status(volume_medio_base),
                 "distribuicao": {
                     "abaixo_40%": len([v for v in volumes if v < 40]),
                     "entre_40_60%": len([v for v in volumes if 40 <= v < 60]),
@@ -532,6 +545,24 @@ class ONSReservoirCollector:
         logger.info(f"  Distribuição: <40%: {stats['geral']['distribuicao']['abaixo_40%']}, 40-60%: {stats['geral']['distribuicao']['entre_40_60%']}")
         
         return stats
+
+    def _calculate_weighted_volume_medio(self, reservoirs: List[ReservoirData]) -> Optional[float]:
+        """Calcula o volume médio ponderado pela capacidade estimada."""
+        total_volume_util = 0.0
+        total_capacidade = 0.0
+
+        for reservoir in reservoirs:
+            percent = reservoir.volume_percentual
+            volume_util = reservoir.volume_util
+            if percent <= 0 or volume_util <= 0:
+                continue
+            capacidade = volume_util / (percent / 100.0)
+            total_volume_util += volume_util
+            total_capacidade += capacidade
+
+        if total_capacidade == 0:
+            return None
+        return (total_volume_util / total_capacidade) * 100.0
     
     def _validate_data_anomalies(self, reservoirs: List[ReservoirData], stats: Dict):
         """Valida anomalias nos dados"""

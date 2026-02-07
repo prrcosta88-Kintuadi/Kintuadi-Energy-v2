@@ -19,26 +19,24 @@ A solução está estruturada em dois ambientes complementares:
 - Calcula exposição energética e financeira, cenários e indicadores de hedge.
 
 ## Estrutura do projeto
-```
 Kintuadi-Energy-v2/
-├── data/                     # Dados coletados e outputs
-├── logs/                     # Logs de execução
+├── data/ # Dados coletados e outputs
+├── logs/ # Logs de execução
 ├── scripts/
-│   ├── data_models.py         # Modelos de dados
-│   ├── ons_collector_v2.py    # Coletor ONS
-│   ├── ccee_collector_v2.py   # Coletor CCEE (PLD)
-│   ├── analyzer_v2.py         # Análise integrada básica
-│   ├── core_analysis.py       # Análises CORE explicáveis
-│   ├── premium_module.py      # Importação/normalização Premium
-│   ├── integrated_collector_v2.py
-│   └── utils.py
-├── dashboard_integrado.py     # Dashboard integrado CORE + PREMIUM
-├── run_collector.py           # Script de execução
-├── requirements.txt           # Dependências
-├── test_ons_api.py            # Testes ONS
-├── test_ccee_api.py           # Testes CCEE
+│ ├── data_models.py # Modelos de dados
+│ ├── ons_collector_v2.py # Coletor ONS
+│ ├── ccee_collector_v2.py # Coletor CCEE (PLD)
+│ ├── analyzer_v2.py # Análise integrada básica
+│ ├── core_analysis.py # Análises CORE explicáveis
+│ ├── premium_module.py # Importação/normalização Premium
+│ ├── integrated_collector_v2.py
+│ └── utils.py
+├── dashboard_integrado.py # Dashboard integrado CORE + PREMIUM
+├── run_collector.py # Script de execução
+├── requirements.txt # Dependências
+├── test_ons_api.py # Testes ONS
+├── test_ccee_api.py # Testes CCEE
 └── README.md
-```
 
 ## Fluxo de dados (CORE vs PREMIUM)
 1. **Coleta**
@@ -90,30 +88,3 @@ O template possui uma aba chamada **dados_usuario** com as colunas:
 Para gerar um template automaticamente:
 ```bash
 python -c "from scripts.premium_module import generate_premium_template; generate_premium_template('premium_template.xlsx')"
-```
-
-## Execução
-### Coleta de dados
-```bash
-python run_collector.py
-```
-
-### Dashboard
-```bash
-streamlit run dashboard_integrado.py
-```
-
-### Testes das APIs
-```bash
-python test_ons_api.py
-python test_ccee_api.py
-```
-
-## Requisitos
-- Python 3.10+
-- Dependências listadas em `requirements.txt`
-
-## Diretrizes
-- Não remover funcionalidades existentes.
-- Priorizar refatoração incremental.
-- Manter separação entre coleta, normalização, análise e visualização.
