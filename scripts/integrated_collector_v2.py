@@ -54,6 +54,9 @@ class KintuadiIntegratedCollectorV2:
         if not self.modules_loaded:
             logger.error("Módulos não carregados. Verifique os imports.")
             return None
+        if not self.ons_collector or not self.ccee_collector or not self.analyzer:
+            logger.error("Coletores não inicializados. Verifique erros de importação.")
+            return None
         
         logger.info("=" * 70)
         logger.info("⚡ KINTUADI ENERGY INTELLIGENCE v2.0")

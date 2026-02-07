@@ -145,6 +145,8 @@ def build_core_analysis(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     contratos = {
         "agregados_por_duracao": open_data.get("sumario_distribuicao_mensal"),
         "status": "parcial" if open_data.get("sumario_distribuicao_mensal") else "indisponível",
+    }
+    
     mcp = {
         "sumario_mensal": _safe_get(ccee, "mcp_summary"),
         "status": "parcial" if _safe_get(ccee, "mcp_summary") else "indisponível",
