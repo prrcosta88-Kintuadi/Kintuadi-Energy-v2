@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta, date
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from .data_models import PLDData, DataMetadata
 from .audit_logger import AuditLogger
 
@@ -23,6 +23,13 @@ class CCEEPLDCollector:
         self.enable_audit = enable_audit
         if enable_audit:
             self.audit_logger = AuditLogger()
+
+        self._additional_datasets = {
+            "contabilizacao_montante_perfil_agente": "76d1cf4c-da8c-47a5-9f0d-8b50079be960",
+            "sumario_balanco_energetico_horario": "9418da65-0f9f-4f66-a43f-6517db9653f3",
+            "sumario_distribuicao_mensal": "9e8e3f5f-58a8-4744-b6da-7309a4513fcb",
+        }
+        self._resource_show_url = f"{self.base_url}/resource_show"
     
     def collect_pld_data(self, days: int = 7) -> Dict:
         """Coleta dados PLD com auditoria completa"""
@@ -118,6 +125,75 @@ class CCEEPLDCollector:
             metadata.status = "error"
             metadata.error_message = str(e)
             return {"metadata": metadata.to_dict(), "data": []}
+
+    def collect_additional_datasets(self, limit: int = 5) -> Dict[str, Dict]:
+        """Coleta datasets adicionais validados nos testes CCEE."""
+        datasets = {}
+        for name, resource_id in self._additional_datasets.items():
+            datasets[name] = self._fetch_dataset(resource_id, limit=limit)
+        return datasets
+
+    def collect_open_data_csv(self, limit: int = 500) -> Dict[str, Dict[str, Any]]:
+        """Coleta datasets adicionais via links CSV (open data)."""
+        datasets = {}
+        for name, resource_id in self._additional_datasets.items():
+            datasets[name] = self._fetch_dataset_csv(resource_id, limit=limit)
+        return datasets
+
+    def _fetch_dataset(self, resource_id: str, limit: int = 5) -> Dict:
+        """Consulta um dataset específico da CCEE."""
+        params = {"resource_id": resource_id, "limit": limit}
+        try:
+            response = requests.get(f"{self.base_url}/datastore_search", params=params, timeout=30)
+            response.raise_for_status()
+        except Exception as exc:
+            logger.error(f"CCEE: Erro ao buscar dataset {resource_id}: {exc}")
+            return {"success": False, "error": str(exc), "records": []}
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            logger.error(f"CCEE: JSON inválido para {resource_id}: {exc}")
+            return {"success": False, "error": str(exc), "records": []}
+
+        result = payload.get("result", {})
+        return {
+            "success": payload.get("success", False),
+            "records": result.get("records", []),
+            "total": result.get("total"),
+        }
+
+    def _fetch_dataset_csv(self, resource_id: str, limit: int = 500) -> Dict[str, Any]:
+        """Busca o link CSV do dataset via resource_show e retorna amostra."""
+        try:
+            response = requests.get(self._resource_show_url, params={"id": resource_id}, timeout=30)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logger.error(f"CCEE: Erro ao buscar resource_show {resource_id}: {exc}")
+            return {"success": False, "error": str(exc), "records": []}
+
+        if not payload.get("success"):
+            return {"success": False, "error": "resource_show failed", "records": []}
+
+        resource = payload.get("result", {})
+        csv_url = resource.get("url")
+        if not csv_url:
+            return {"success": False, "error": "CSV url ausente", "records": []}
+
+        try:
+            df = pd.read_csv(csv_url, nrows=limit)
+        except Exception as exc:
+            logger.error(f"CCEE: Erro ao ler CSV {resource_id}: {exc}")
+            return {"success": False, "error": str(exc), "records": []}
+
+        return {
+            "success": True,
+            "records": df.to_dict(orient="records"),
+            "columns": list(df.columns),
+            "source_url": csv_url,
+            "sample_size": len(df),
+        }
     
     def _fetch_pld_data(self, days: int) -> List[Dict]:
         """Busca dados da API com paginação e logging"""
