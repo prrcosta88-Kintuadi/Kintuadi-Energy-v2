@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import logging
 from datetime import datetime, date
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from .data_models import ReservoirData, DataMetadata
 from .audit_logger import AuditLogger
 
@@ -17,6 +17,169 @@ class ONSReservoirCollector:
         self.cache_ttl = cache_ttl_minutes
         self._cache = {}
         self._cache_time = {}
+
+        self._energia_agora_endpoints = [
+            "Geracao_SIN_Eolica_json",
+            "Geracao_SIN_Hidraulica_json",
+            "Geracao_SIN_Nuclear_json",
+            "Geracao_SIN_Solar_json",
+            "Geracao_SIN_Termica_json",
+            "Geracao_Norte_Eolica_json",
+            "Geracao_Norte_Hidraulica_json",
+            "Geracao_Norte_Nuclear_json",
+            "Geracao_Norte_Solar_json",
+            "Geracao_Norte_Termica_json",
+            "Geracao_Nordeste_Eolica_json",
+            "Geracao_Nordeste_Hidraulica_json",
+            "Geracao_Nordeste_Nuclear_json",
+            "Geracao_Nordeste_Solar_json",
+            "Geracao_Nordeste_Termica_json",
+            "Geracao_Sudeste_Eolica_json",
+            "Geracao_Sudeste_Hidraulica_json",
+            "Geracao_Sudeste_Nuclear_json",
+            "Geracao_Sudeste_Solar_json",
+            "Geracao_Sudeste_Termica_json",
+            "Geracao_Sul_Eolica_json",
+            "Geracao_Sul_Hidraulica_json",
+            "Geracao_Sul_Nuclear_json",
+            "Geracao_Sul_Solar_json",
+            "Geracao_Sul_Termica_json",
+        ]
+        self._carga_agora_endpoints = [
+            "Carga_SIN_json",
+            "Carga_Norte_json",
+            "Carga_Nordeste_json",
+            "Carga_SudesteECentroOeste_json",
+            "Carga_Sul_json",
+        ]
+        self._open_data_datasets = [
+            {
+                "name": "Reservatórios",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/reservatorio/"
+                "DicionarioDados_Reservatorio.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/reservatorio/"
+                "RESERVATORIOS.csv",
+            },
+            {
+                "name": "EAR Diário Reservatórios",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ear_reservatorio_di/"
+                "DicionarioDados_EarPorReservatorio.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ear_reservatorio_di/"
+                "EAR_DIARIO_RESERVATORIOS_2026.csv",
+            },
+            {
+                "name": "ENA Diário Reservatórios",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ena_reservatorio_di/"
+                "DicionarioDados_EnaPorReservatorio.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ena_reservatorio_di/"
+                "ENA_DIARIO_RESERVATORIOS_2026.csv",
+            },
+            {
+                "name": "Dados Hidrológicos Diários",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/dados_hidrologicos_di/"
+                "DicionarioDados_DadosHidrologicosDiarios.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/dados_hidrologicos_di/"
+                "DADOS_HIDROLOGICOS_RES_2026.csv",
+            },
+            {
+                "name": "Dados Hidrológicos Horários",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/dados_hidrologicos_ho/"
+                "DicionarioDados_DadosHidrologicosHorarios.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/dados_hidrologicos_ho/"
+                "DADOS_HIDROLOGICOS_HO_2026_02.csv",
+            },
+            {
+                "name": "EAR Diário REE",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ear_ree_di/"
+                "DicionarioDados_EarPorResEquivalente.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ear_ree_di/"
+                "EAR_DIARIO_REE_2026.csv",
+            },
+            {
+                "name": "ENA Diário REE",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ena_ree_di/"
+                "DicionarioDados_EnaPorResEquivalente.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ena_ree_di/"
+                "ENA_DIARIO_REE_2026.csv",
+            },
+            {
+                "name": "EAR Diário Subsistema",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ear_subsistema_di/"
+                "DicionarioDados_EarPorSubsistema.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ear_subsistema_di/"
+                "EAR_DIARIO_SUBSISTEMA_2026.csv",
+            },
+            {
+                "name": "EAR Diário Bacia",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ear_bacia_di/"
+                "DicionarioDados_EarPorBacia.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ear_bacia_di/"
+                "EAR_DIARIO_BACIAS_2026.csv",
+            },
+            {
+                "name": "ENA Diário Subsistema",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ena_subsistema_di/"
+                "DicionarioDados_EnaPorSubsistema.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ena_subsistema_di/"
+                "ENA_DIARIO_SUBSISTEMA_2026.csv",
+            },
+            {
+                "name": "ENA Diário Bacia",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ena_bacia_di/"
+                "DicionarioDados_EnaPorBacia.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/ena_bacia_di/"
+                "ENA_DIARIO_BACIAS_2026.csv",
+            },
+            {
+                "name": "Volume Espera",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/res_volumeespera/"
+                "DicionarioDados_VolumeEsperaRecomendado.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/res_volumeespera/"
+                "RES_VOLUMEESPERA_2026.csv",
+            },
+            {
+                "name": "Energia Vertida Turbinável",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/energia_vertida_turbinavel_ho/"
+                "DicionarioDados_EnergiaVertidaTurbinavel.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/energia_vertida_turbinavel_ho/"
+                "ENERGIA_VERTIDA_TURBINAVEL_2026_02.csv",
+            },
+            {
+                "name": "Intercâmbio Nacional",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_nacional_ho/"
+                "DicionarioDados_Intercambio_Nacional.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_nacional_ho/"
+                "INTERCAMBIO_NACIONAL_2026.csv",
+            },
+            {
+                "name": "Intercâmbio Internacional",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_internacional_ho/"
+                "DicionarioDados_Intercambio_Internacional.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_internacional_ho/"
+                "INTERCAMBIO_INTERNACIONAL_2026.csv",
+            },
+            {
+                "name": "Intercâmbio por Modalidade",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_modalidade_ho/"
+                "DicionarioDados_Intercambio_Energia_Modalidade.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_modalidade_ho/"
+                "INTERCAMBIO_ENERGIA_MODALIDADE_2026.csv",
+            },
+            {
+                "name": "CVU Usina Térmica",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/cvu_usitermica_se/"
+                "DicionarioDados_CVU_UsinaTermica.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/cvu_usitermica_se/"
+                "CVU_USINA_TERMICA_2026.csv",
+            },
+            {
+                "name": "Capacidade Instalada",
+                "dict_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/capacidade-geracao/"
+                "DicionarioDados_Capacidade_Instalada_Geracao.json",
+                "csv_url": "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/capacidade-geracao/"
+                "CAPACIDADE_GERACAO.csv",
+            },
+        ]
         
         # Sistema de auditoria
         self.enable_audit = enable_audit
@@ -113,6 +276,76 @@ class ONSReservoirCollector:
             metadata.status = "error"
             metadata.error_message = str(e)
             return {"metadata": metadata.to_dict(), "data": []}
+
+    def collect_energia_agora(self, limit: int = 3) -> Dict[str, Dict]:
+        """Coleta amostras de geração da API Energia Agora."""
+        return self._collect_energy_series(self._energia_agora_endpoints, limit)
+
+    def collect_carga_agora(self, limit: int = 3) -> Dict[str, Dict]:
+        """Coleta amostras de carga da API Energia Agora."""
+        return self._collect_energy_series(self._carga_agora_endpoints, limit)
+
+    def collect_balanco_energetico(self) -> Dict:
+        """Coleta o balanço energético consolidado."""
+        endpoint = f"{self.base_url}/energiaagora/GetBalancoEnergeticoConsolidado/null"
+        headers = {"accept": "application/json"}
+        try:
+            response = requests.get(endpoint, headers=headers, timeout=30)
+            if response.status_code == 204:
+                return {"success": True, "records": [], "status_code": 204}
+            response.raise_for_status()
+            return {"success": True, "records": response.json(), "status_code": response.status_code}
+        except Exception as exc:
+            logger.error(f"Erro ao buscar balanço energético: {exc}")
+            return {"success": False, "error": str(exc)}
+
+    def collect_open_data_csv(self, limit: int = 500) -> Dict[str, Dict[str, Any]]:
+        """Coleta datasets ONS via links CSV diretos."""
+        datasets = {}
+        for dataset in self._open_data_datasets:
+            datasets[dataset["name"]] = self._fetch_open_data_csv(dataset, limit=limit)
+        return datasets
+
+    def _fetch_open_data_csv(self, dataset: Dict[str, str], limit: int = 500) -> Dict[str, Any]:
+        csv_url = dataset.get("csv_url")
+        if not csv_url:
+            return {"success": False, "error": "CSV url ausente", "records": []}
+        try:
+            df = pd.read_csv(csv_url, nrows=limit)
+        except Exception as exc:
+            logger.error(f"Erro ao ler CSV ONS {dataset.get('name')}: {exc}")
+            return {"success": False, "error": str(exc), "records": []}
+
+        return {
+            "success": True,
+            "records": df.to_dict(orient="records"),
+            "columns": list(df.columns),
+            "source_url": csv_url,
+            "dictionary_url": dataset.get("dict_url"),
+            "sample_size": len(df),
+        }
+
+    def _collect_energy_series(self, endpoints: List[str], limit: int = 3) -> Dict[str, Dict]:
+        results = {}
+        base_url = f"{self.base_url}/energiaagora/Get"
+        headers = {"accept": "application/json"}
+
+        for endpoint in endpoints:
+            url = f"{base_url}/{endpoint}"
+            try:
+                response = requests.get(url, headers=headers, timeout=30)
+                if response.status_code == 204:
+                    results[endpoint] = {"success": True, "records": [], "status_code": 204}
+                    continue
+                response.raise_for_status()
+                data = response.json()
+                records = data[:limit] if isinstance(data, list) else data
+                results[endpoint] = {"success": True, "records": records, "status_code": response.status_code}
+            except Exception as exc:
+                logger.error(f"Erro ao buscar {endpoint}: {exc}")
+                results[endpoint] = {"success": False, "error": str(exc)}
+
+        return results
     
     def _fetch_reservoir_data(self) -> List[Dict]:
         """Busca dados da API do ONS com logging detalhado"""
