@@ -34,6 +34,8 @@ class KintuadiIntegratedCollectorV2:
             self.ons_collector_v2 = ONSReservoirCollector(cache_ttl_minutes=30, enable_audit=True)
             self.ccee_collector_v2 = CCEEPLDCollector(cache_ttl_minutes=60, enable_audit=True)
             self.analyzer = EnergyMarketAnalyzer()
+            self.ons_collector_v2 = self.ons_collector
+            self.ccee_collector_v2 = self.ccee_collector
             
             self.modules_loaded = True
             
