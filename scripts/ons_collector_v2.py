@@ -17,6 +17,41 @@ class ONSReservoirCollector:
         self.cache_ttl = cache_ttl_minutes
         self._cache = {}
         self._cache_time = {}
+
+        self._energia_agora_endpoints = [
+            "Geracao_SIN_Eolica_json",
+            "Geracao_SIN_Hidraulica_json",
+            "Geracao_SIN_Nuclear_json",
+            "Geracao_SIN_Solar_json",
+            "Geracao_SIN_Termica_json",
+            "Geracao_Norte_Eolica_json",
+            "Geracao_Norte_Hidraulica_json",
+            "Geracao_Norte_Nuclear_json",
+            "Geracao_Norte_Solar_json",
+            "Geracao_Norte_Termica_json",
+            "Geracao_Nordeste_Eolica_json",
+            "Geracao_Nordeste_Hidraulica_json",
+            "Geracao_Nordeste_Nuclear_json",
+            "Geracao_Nordeste_Solar_json",
+            "Geracao_Nordeste_Termica_json",
+            "Geracao_Sudeste_Eolica_json",
+            "Geracao_Sudeste_Hidraulica_json",
+            "Geracao_Sudeste_Nuclear_json",
+            "Geracao_Sudeste_Solar_json",
+            "Geracao_Sudeste_Termica_json",
+            "Geracao_Sul_Eolica_json",
+            "Geracao_Sul_Hidraulica_json",
+            "Geracao_Sul_Nuclear_json",
+            "Geracao_Sul_Solar_json",
+            "Geracao_Sul_Termica_json",
+        ]
+        self._carga_agora_endpoints = [
+            "Carga_SIN_json",
+            "Carga_Norte_json",
+            "Carga_Nordeste_json",
+            "Carga_SudesteECentroOeste_json",
+            "Carga_Sul_json",
+        ]
         
         # Sistema de auditoria
         self.enable_audit = enable_audit
@@ -113,6 +148,50 @@ class ONSReservoirCollector:
             metadata.status = "error"
             metadata.error_message = str(e)
             return {"metadata": metadata.to_dict(), "data": []}
+
+    def collect_energia_agora(self, limit: int = 3) -> Dict[str, Dict]:
+        """Coleta amostras de geração da API Energia Agora."""
+        return self._collect_energy_series(self._energia_agora_endpoints, limit)
+
+    def collect_carga_agora(self, limit: int = 3) -> Dict[str, Dict]:
+        """Coleta amostras de carga da API Energia Agora."""
+        return self._collect_energy_series(self._carga_agora_endpoints, limit)
+
+    def collect_balanco_energetico(self) -> Dict:
+        """Coleta o balanço energético consolidado."""
+        endpoint = f"{self.base_url}/energiaagora/GetBalancoEnergeticoConsolidado/null"
+        headers = {"accept": "application/json"}
+        try:
+            response = requests.get(endpoint, headers=headers, timeout=30)
+            if response.status_code == 204:
+                return {"success": True, "records": [], "status_code": 204}
+            response.raise_for_status()
+            return {"success": True, "records": response.json(), "status_code": response.status_code}
+        except Exception as exc:
+            logger.error(f"Erro ao buscar balanço energético: {exc}")
+            return {"success": False, "error": str(exc)}
+
+    def _collect_energy_series(self, endpoints: List[str], limit: int = 3) -> Dict[str, Dict]:
+        results = {}
+        base_url = f"{self.base_url}/energiaagora/Get"
+        headers = {"accept": "application/json"}
+
+        for endpoint in endpoints:
+            url = f"{base_url}/{endpoint}"
+            try:
+                response = requests.get(url, headers=headers, timeout=30)
+                if response.status_code == 204:
+                    results[endpoint] = {"success": True, "records": [], "status_code": 204}
+                    continue
+                response.raise_for_status()
+                data = response.json()
+                records = data[:limit] if isinstance(data, list) else data
+                results[endpoint] = {"success": True, "records": records, "status_code": response.status_code}
+            except Exception as exc:
+                logger.error(f"Erro ao buscar {endpoint}: {exc}")
+                results[endpoint] = {"success": False, "error": str(exc)}
+
+        return results
     
     def _fetch_reservoir_data(self) -> List[Dict]:
         """Busca dados da API do ONS com logging detalhado"""

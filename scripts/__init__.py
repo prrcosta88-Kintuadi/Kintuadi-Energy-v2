@@ -8,12 +8,11 @@ __author__ = "Kintuadi Energy Team"
 
 # Importações principais
 try:
-    from .ccee_collector import CCEECollector
-    from .ons_reservatorios import ONSReservatoriosCollector
-    from .ons_auth import ONSAuthenticator
-    from .ons_volume_util import ONSVolumeUtilCollector
-    from .integrated_collector import KintuadiIntegratedCollector
-    from .energy_analyzer import EnergyAnalyzer
+    # Preferir módulos v2 quando disponíveis
+    from .ccee_collector_v2 import CCEEPLDCollector
+    from .ons_collector_v2 import ONSReservoirCollector
+    from .integrated_collector_v2 import KintuadiIntegratedCollectorV2
+    from .analyzer_v2 import EnergyMarketAnalyzer
     
     # CORREÇÃO: Remover JSONEncoder se não existe em utils.py
     try:
@@ -45,12 +44,10 @@ try:
                 return json.load(f)
     
     __all__ = [
-        'CCEECollector',
-        'ONSReservatoriosCollector',
-        'ONSAuthenticator',
-        'ONSVolumeUtilCollector',
-        'KintuadiIntegratedCollector',
-        'EnergyAnalyzer',
+        'CCEEPLDCollector',
+        'ONSReservoirCollector',
+        'KintuadiIntegratedCollectorV2',
+        'EnergyMarketAnalyzer',
         'make_serializable',
         'save_json',
         'load_json'
@@ -58,10 +55,29 @@ try:
     
     MODULES_LOADED = True
     
-except ImportError as e:
-    print(f"⚠️ Aviso: Erro ao importar módulos: {e}")
-    __all__ = []
-    MODULES_LOADED = False
+except ImportError:
+    # Fallback para módulos legados (v1)
+    try:
+        from .ccee_collector import CCEECollector
+        from .ons_reservatorios import ONSReservatoriosCollector
+        from .ons_auth import ONSAuthenticator
+        from .ons_volume_util import ONSVolumeUtilCollector
+        from .integrated_collector import KintuadiIntegratedCollector
+        from .energy_analyzer import EnergyAnalyzer
+
+        __all__ = [
+            'CCEECollector',
+            'ONSReservatoriosCollector',
+            'ONSAuthenticator',
+            'ONSVolumeUtilCollector',
+            'KintuadiIntegratedCollector',
+            'EnergyAnalyzer',
+        ]
+        MODULES_LOADED = True
+    except ImportError as e:
+        print(f"⚠️ Aviso: Erro ao importar módulos: {e}")
+        __all__ = []
+        MODULES_LOADED = False
 
 def get_version():
     return __version__
