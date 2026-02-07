@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 import os
 from typing import Dict, Optional
+from xml.etree.ElementTree import Element, ElementTree
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,8 @@ class KintuadiIntegratedCollectorV2:
             complete_file = f"data/kintuadi_complete_{timestamp}.json"
             with open(complete_file, 'w', encoding='utf-8') as f:
                 json.dump(data_to_save, f, indent=2, ensure_ascii=False, default=str)
+            complete_xml_file = f"data/kintuadi_complete_{timestamp}.xml"
+            self._save_xml(self._prepare_dashboard_xml_data(data_to_save), complete_xml_file, "kintuadi_complete")
             
             # 2. Dados para dashboard (formatado)
             dashboard_data = self._prepare_dashboard_data(data_to_save)
@@ -187,10 +190,15 @@ class KintuadiIntegratedCollectorV2:
             with open(dashboard_file, 'w', encoding='utf-8') as f:
                 json.dump(dashboard_data, f, indent=2, ensure_ascii=False, default=str)
             
+            dashboard_xml_file = f"data/kintuadi_dashboard_{timestamp}.xml"
+            self._save_xml(self._prepare_dashboard_xml_data(dashboard_data), dashboard_xml_file, "kintuadi_dashboard")
+            
             # 3. Atualiza arquivo latest
             latest_file = "data/kintuadi_latest.json"
             with open(latest_file, 'w', encoding='utf-8') as f:
                 json.dump(dashboard_data, f, indent=2, ensure_ascii=False, default=str)
+            latest_xml_file = "data/kintuadi_latest.xml"
+            self._save_xml(self._prepare_dashboard_xml_data(dashboard_data), latest_xml_file, "kintuadi_dashboard")
             
             # 4. Log de sucesso
             success_file = f"data/kintuadi_success_{timestamp}.log"
@@ -200,12 +208,17 @@ class KintuadiIntegratedCollectorV2:
                 f.write(f"Arquivos gerados:\n")
                 f.write(f"  - {complete_file}\n")
                 f.write(f"  - {dashboard_file}\n")
+                f.write(f"  - {dashboard_xml_file}\n")
                 f.write(f"  - {latest_file}\n")
+                f.write(f"  - {latest_xml_file}\n")
+                f.write(f"  - {complete_xml_file}\n")
             
             logger.info(f"📁 Arquivos salvos:")
             logger.info(f"   • Completo: {complete_file}")
             logger.info(f"   • Dashboard: {dashboard_file}")
             logger.info(f"   • Latest: {latest_file}")
+            logger.info(f"   • Dashboard XML: {dashboard_xml_file}")
+            logger.info(f"   • Latest XML: {latest_xml_file}")
             
         except Exception as e:
             logger.error(f"Erro ao salvar resultados: {e}")
@@ -222,6 +235,30 @@ class KintuadiIntegratedCollectorV2:
             return {k: self._convert_objects_to_dict(v) for k, v in data.__dict__.items()}
         else:
             return data
+    
+    def _save_xml(self, data: Dict, path: str, root_name: str) -> None:
+        root = self._to_xml_element(root_name, data)
+        tree = ElementTree(root)
+        tree.write(path, encoding="utf-8", xml_declaration=True)
+
+    def _to_xml_element(self, name: str, value) -> Element:
+        tag = self._sanitize_xml_tag(name)
+        element = Element(tag)
+        if isinstance(value, dict):
+            for key, item in value.items():
+                element.append(self._to_xml_element(key, item))
+        elif isinstance(value, list):
+            for item in value:
+                element.append(self._to_xml_element("item", item))
+        else:
+            element.text = "" if value is None else str(value)
+        return element
+
+    def _sanitize_xml_tag(self, tag: str) -> str:
+        safe = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(tag))
+        if safe and safe[0].isdigit():
+            safe = f"n_{safe}"
+        return safe or "item"
     
     def _prepare_dashboard_data(self, data: Dict) -> Dict:
         """Prepara dados simplificados para o dashboard"""
@@ -251,13 +288,15 @@ class KintuadiIntegratedCollectorV2:
                 'statistics': ons_data.get('statistics', {}),
                 'subsistemas': ons_data.get('subsistemas', {}),
                 'metadata': ons_metadata,
-                'data_sample': ons_data.get('data', [])[:5]  # Amostra para debug
+                'data_sample': ons_data.get('data', [])[:5],  # Amostra para debug
+                'open_data_csv': ons_data.get('open_data_csv', {}),
             },
             'ccee': {
                 'statistics': ccee_data.get('statistics', {}),
                 'timeseries': ccee_data.get('timeseries', []),
                 'metadata': ccee_metadata,
-                'data_sample': ccee_data.get('data', [])[:5]  # Amostra para debug
+                'data_sample': ccee_data.get('data', [])[:5],  # Amostra para debug
+                'open_data_csv': ccee_data.get('open_data_csv', {}),
             },
             'analysis': analysis_data
         }
@@ -274,6 +313,35 @@ class KintuadiIntegratedCollectorV2:
                 return obj
         
         return convert_numbers(dashboard_data)
+
+    def _prepare_dashboard_xml_data(self, dashboard_data: Dict) -> Dict:
+        normalized = self._normalize_for_xml(dashboard_data)
+        return normalized if isinstance(normalized, dict) else {"data": normalized}
+
+    def _normalize_for_xml(self, value):
+        if isinstance(value, dict):
+            return {key: self._normalize_for_xml(item) for key, item in value.items()}
+        if isinstance(value, list):
+            if value and all(isinstance(item, dict) for item in value):
+                columns = list(value[0].keys())
+                rows = [self._normalize_for_xml(item) for item in value]
+                return {"columns": columns, "rows": rows}
+            return [self._normalize_for_xml(item) for item in value]
+        if isinstance(value, bool):
+            return str(value)
+        if isinstance(value, (int, float)):
+            return self._format_number(value)
+        return value
+
+    def _format_number(self, value):
+        if isinstance(value, bool):
+            return str(value)
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            text = f"{value:.6f}".rstrip("0").rstrip(".")
+            return text.replace(".", ",")
+        return str(value)
     
     def _log_summary(self, data: Dict):
         """Gera log resumido da coleta"""

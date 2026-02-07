@@ -1,4 +1,5 @@
 # scripts/ons_collector_v2.py - COM AUDITORIA
+import os
 import requests
 import pandas as pd
 import logging
@@ -238,6 +239,11 @@ class ONSReservoirCollector:
             
             # 3. Calcula estatísticas
             stats = self._calculate_reservoir_statistics(reservoir_objects)
+            ear_ree_volume = self._calculate_ear_ree_volume_percent()
+            if ear_ree_volume is not None:
+                stats["geral"]["volume_medio_sistema_ear_ree"] = ear_ree_volume
+                stats["geral"]["volume_medio"] = ear_ree_volume
+                stats["geral"]["status_sistema"] = self._determine_system_status(ear_ree_volume)
             
             # 4. Valida anomalias
             self._validate_data_anomalies(reservoir_objects, stats)
@@ -302,7 +308,11 @@ class ONSReservoirCollector:
     def collect_open_data_csv(self, limit: int = 500) -> Dict[str, Dict[str, Any]]:
         """Coleta datasets ONS via links CSV diretos."""
         datasets = {}
+        os.makedirs("data/ons_open_data", exist_ok=True)
         for dataset in self._open_data_datasets:
+            csv_url = dataset.get("csv_url")
+            if csv_url:
+                self._download_csv_file(csv_url, "data/ons_open_data")
             datasets[dataset["name"]] = self._fetch_open_data_csv(dataset, limit=limit)
         return datasets
 
@@ -330,6 +340,21 @@ class ONSReservoirCollector:
             "dictionary_url": dataset.get("dict_url"),
             "sample_size": len(df),
         }
+
+    def _download_csv_file(self, csv_url: str, output_dir: str) -> Optional[str]:
+        filename = os.path.basename(csv_url.split("?")[0])
+        if not filename:
+            return None
+        output_path = os.path.join(output_dir, filename)
+        try:
+            response = requests.get(csv_url, timeout=60)
+            response.raise_for_status()
+            with open(output_path, "wb") as file:
+                file.write(response.content)
+            return output_path
+        except Exception as exc:
+            logger.error(f"Erro ao baixar CSV ONS {csv_url}: {exc}")
+            return None
 
     def _collect_energy_series(self, endpoints: List[str], limit: int = 3) -> Dict[str, Dict]:
         results = {}
@@ -546,6 +571,53 @@ class ONSReservoirCollector:
         
         return stats
 
+    def _calculate_ear_ree_volume_percent(self) -> Optional[float]:
+        dataset = next(
+            (item for item in self._open_data_datasets if item["name"] == "EAR Diário REE"),
+            None,
+        )
+        if not dataset:
+            return None
+        csv_url = dataset.get("csv_url")
+        if not csv_url:
+            return None
+        try:
+            df = pd.read_csv(
+                csv_url,
+                sep=";",
+                encoding="latin1",
+                on_bad_lines="skip",
+            )
+        except Exception as exc:
+            logger.error(f"Erro ao ler EAR Diário REE: {exc}")
+            return None
+
+        required_columns = {"ear_data", "ear_max_ree", "ear_verif_ree_mwmes"}
+        column_map = {str(col).lower(): col for col in df.columns}
+        if not required_columns.issubset(column_map.keys()):
+            logger.error("EAR Diário REE: colunas esperadas não encontradas.")
+            return None
+        df = df.rename(columns=column_map)
+
+        df["ear_data"] = pd.to_datetime(df["ear_data"], errors="coerce")
+        df = df.dropna(subset=["ear_data"])
+        if df.empty:
+            return None
+
+        latest_date = df["ear_data"].max()
+        latest = df[df["ear_data"] == latest_date].copy()
+        latest["ear_verif_ree_mwmes"] = pd.to_numeric(
+            latest["ear_verif_ree_mwmes"], errors="coerce"
+        ).fillna(0)
+        latest["ear_max_ree"] = pd.to_numeric(
+            latest["ear_max_ree"], errors="coerce"
+        ).fillna(0)
+        total_verif = latest["ear_verif_ree_mwmes"].sum()
+        total_max = latest["ear_max_ree"].sum()
+        if total_max == 0:
+            return None
+        return (total_verif / total_max) * 100.0
+    
     def _calculate_weighted_volume_medio(self, reservoirs: List[ReservoirData]) -> Optional[float]:
         """Calcula o volume médio ponderado pela capacidade estimada."""
         total_volume_util = 0.0
