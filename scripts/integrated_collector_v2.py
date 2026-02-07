@@ -67,6 +67,7 @@ class KintuadiIntegratedCollectorV2:
             # 1. Coleta ONS
             logger.info("\n[1/3] Coletando dados do ONS...")
             ons_results = self.ons_collector.collect_reservoir_data()
+            ons_results["open_data_csv"] = self.ons_collector.collect_open_data_csv(limit=500)
             results['sources']['ons'] = ons_results
             
             # CORREÇÃO: Acessa status corretamente
@@ -84,6 +85,7 @@ class KintuadiIntegratedCollectorV2:
             # 2. Coleta CCEE
             logger.info("\n[2/3] Coletando dados da CCEE...")
             ccee_results = self.ccee_collector.collect_pld_data(days=7)
+            ccee_results["open_data_csv"] = self.ccee_collector.collect_open_data_csv(limit=500)
             results['sources']['ccee'] = ccee_results
             
             # CORREÇÃO: Acessa status corretamente

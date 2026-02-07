@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import logging
 from datetime import datetime, date
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from .data_models import ReservoirData, DataMetadata
 from .audit_logger import AuditLogger
 
