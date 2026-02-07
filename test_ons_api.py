@@ -173,6 +173,66 @@ OPEN_DATASETS = [
         "ENERGIA_VERTIDA_TURBINAVEL_2026_02.csv",
         "csv",
     ),
+    (
+        "Dicionário Intercâmbio Nacional (JSON)",
+        "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_nacional_ho/"
+        "DicionarioDados_Intercambio_Nacional.json",
+        "json",
+    ),
+    (
+        "Intercâmbio Nacional (CSV)",
+        "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_nacional_ho/"
+        "INTERCAMBIO_NACIONAL_2026.csv",
+        "csv",
+    ),
+    (
+        "Dicionário Intercâmbio Internacional (JSON)",
+        "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_internacional_ho/"
+        "DicionarioDados_Intercambio_Internacional.json",
+        "json",
+    ),
+    (
+        "Intercâmbio Internacional (CSV)",
+        "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_internacional_ho/"
+        "INTERCAMBIO_INTERNACIONAL_2026.csv",
+        "csv",
+    ),
+    (
+        "Dicionário Intercâmbio por Modalidade (JSON)",
+        "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_modalidade_ho/"
+        "DicionarioDados_Intercambio_Energia_Modalidade.json",
+        "json",
+    ),
+    (
+        "Intercâmbio por Modalidade (CSV)",
+        "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/intercambio_modalidade_ho/"
+        "INTERCAMBIO_ENERGIA_MODALIDADE_2026.csv",
+        "csv",
+    ),
+    (
+        "Dicionário CVU Usina Térmica (JSON)",
+        "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/cvu_usitermica_se/"
+        "DicionarioDados_CVU_UsinaTermica.json",
+        "json",
+    ),
+    (
+        "CVU Usina Térmica (CSV)",
+        "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/cvu_usitermica_se/"
+        "CVU_USINA_TERMICA_2026.csv",
+        "csv",
+    ),
+    (
+        "Dicionário Capacidade Instalada (JSON)",
+        "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/capacidade-geracao/"
+        "DicionarioDados_Capacidade_Instalada_Geracao.json",
+        "json",
+    ),
+    (
+        "Capacidade Instalada (CSV)",
+        "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/capacidade-geracao/"
+        "CAPACIDADE_GERACAO.csv",
+        "csv",
+    ),
 ]
 
 EXPECTED_API_DISABLE_MESSAGE = "API desabilitada"
@@ -204,6 +264,13 @@ ENERGIA_AGORA_ENDPOINTS = [
     "Geracao_Sul_Termica_json",
 ]
 
+CARGA_AGORA_ENDPOINTS = [
+    "Carga_SIN_json",
+    "Carga_Norte_json",
+    "Carga_Nordeste_json",
+    "Carga_SudesteECentroOeste_json",
+    "Carga_Sul_json",
+]
 
 @dataclass(frozen=True)
 class AuthToken:
@@ -423,6 +490,11 @@ def test_energia_agora() -> None:
             print(f"❌ {endpoint}: erro de conexão: {exc}")
             continue
 
+        if response.status_code == 204:
+            print(f"⚠️ {endpoint}: sem registros (HTTP 204)")
+            continue
+
+
         if response.status_code != 200:
             print(f"❌ {endpoint}: HTTP {response.status_code}")
             print(f"   Resposta: {response.text[:200]}")
@@ -440,6 +512,72 @@ def test_energia_agora() -> None:
         else:
             print(f"⚠️ {endpoint}: resposta inesperada ({type(payload)})")
 
+def test_carga_agora() -> None:
+    print("\n4. 🔌 Testando API Energia Agora (carga)...")
+    base_url = f"{API_BASE_URL}/energiaagora/Get"
+    headers = {"accept": "application/json"}
+    for endpoint in CARGA_AGORA_ENDPOINTS:
+        url = f"{base_url}/{endpoint}"
+        try:
+            response = requests.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
+        except requests.RequestException as exc:
+            print(f"❌ {endpoint}: erro de conexão: {exc}")
+            continue
+
+        if response.status_code == 204:
+            print(f"⚠️ {endpoint}: sem registros (HTTP 204)")
+            continue
+
+        if response.status_code != 200:
+            print(f"❌ {endpoint}: HTTP {response.status_code}")
+            print(f"   Resposta: {response.text[:200]}")
+            continue
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            print(f"❌ {endpoint}: resposta JSON inválida: {exc}")
+            continue
+
+        if isinstance(payload, list):
+            preview = payload[:3]
+            print(f"✅ {endpoint}: {len(payload)} registros. Exemplo: {preview}")
+        else:
+            print(f"⚠️ {endpoint}: resposta inesperada ({type(payload)})")
+
+
+def test_balanco_energetico() -> None:
+    print("\n5. 📈 Testando balanço energético consolidado...")
+    url = f"{API_BASE_URL}/energiaagora/GetBalancoEnergeticoConsolidado/null"
+    headers = {"accept": "application/json"}
+    try:
+        response = requests.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
+    except requests.RequestException as exc:
+        print(f"❌ Balanço energético: erro de conexão: {exc}")
+        return
+
+    if response.status_code == 204:
+        print("⚠️ Balanço energético: sem registros (HTTP 204)")
+        return
+
+    if response.status_code != 200:
+        print(f"❌ Balanço energético: HTTP {response.status_code}")
+        print(f"   Resposta: {response.text[:200]}")
+        return
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        print(f"❌ Balanço energético: resposta JSON inválida: {exc}")
+        return
+
+    if isinstance(payload, dict):
+        keys = list(payload.keys())
+        print(f"✅ Balanço energético: chaves principais: {keys}")
+        if "Data" in payload:
+            print(f"   Data: {payload.get('Data')}")
+    else:
+        print(f"⚠️ Balanço energético: resposta inesperada ({type(payload)})")
 
 def test_ons_api_direct() -> None:
     """Testa as APIs do ONS para verificar saúde e exemplos de dados."""
@@ -467,7 +605,10 @@ def test_ons_api_direct() -> None:
     reservatorios = test_reservatorios(headers)
 
     test_energia_agora()
+    test_carga_agora()
+    test_balanco_energetico()
 
+    print("\n6. 📊 Testando volume útil histórico...")
     print("\n4. 📊 Testando volume útil histórico...")
     reservatorio_id = "10"
     if reservatorios and isinstance(reservatorios[0], dict):
