@@ -583,6 +583,15 @@ def main():
         else:
             st.success("Sem alertas estruturais no CORE.")
 
+    st.subheader("📄 Indicadores CORE (MCP/Consumo/Perdas/Contratos)")
+    core_table = [
+        {"Indicador": "Contabilização montante perfil agente", "Status": core_analysis.get("mcp", {}).get("status", "N/A")},
+        {"Indicador": "Sumário balanço energético horário submercado", "Status": core_analysis.get("consumo", {}).get("status", "N/A")},
+        {"Indicador": "Sumário distribuição mensal", "Status": core_analysis.get("perdas", {}).get("status", "N/A")},
+        {"Indicador": "Sumário distribuição (contratos)", "Status": core_analysis.get("contratos", {}).get("status", "N/A")},
+    ]
+    st.dataframe(pd.DataFrame(core_table), use_container_width=True)
+
     if prices.get("timeseries"):
         st.subheader("📉 Série temporal do PLD (CORE)")
         ts = prices.get("timeseries", [])

@@ -272,6 +272,7 @@ CARGA_AGORA_ENDPOINTS = [
     "Carga_Sul_json",
 ]
 
+
 @dataclass(frozen=True)
 class AuthToken:
     token_type: str
@@ -512,6 +513,7 @@ def test_energia_agora() -> None:
         else:
             print(f"⚠️ {endpoint}: resposta inesperada ({type(payload)})")
 
+
 def test_carga_agora() -> None:
     print("\n4. 🔌 Testando API Energia Agora (carga)...")
     base_url = f"{API_BASE_URL}/energiaagora/Get"
@@ -578,6 +580,7 @@ def test_balanco_energetico() -> None:
             print(f"   Data: {payload.get('Data')}")
     else:
         print(f"⚠️ Balanço energético: resposta inesperada ({type(payload)})")
+
 
 def test_ons_api_direct() -> None:
     """Testa as APIs do ONS para verificar saúde e exemplos de dados."""

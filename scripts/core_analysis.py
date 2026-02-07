@@ -124,6 +124,27 @@ def build_core_analysis(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         "timeseries": ccee.get("timeseries", []),
     }
 
+    # Datasets validados em test_ccee_api.py (CCEE open data CSV).
+    open_data = _safe_get(ccee, "open_data_csv", default={}) or {}
+
+    mcp = {
+        "sumario_mensal": open_data.get("contabilizacao_montante_perfil_agente"),
+        "status": "parcial" if open_data.get("contabilizacao_montante_perfil_agente") else "indisponível",
+    }
+
+    consumo = {
+        "acl_vs_acr": open_data.get("sumario_balanco_energetico_horario"),
+        "status": "parcial" if open_data.get("sumario_balanco_energetico_horario") else "indisponível",
+    }
+
+    perdas = {
+        "rede_basica": open_data.get("sumario_distribuicao_mensal"),
+        "status": "parcial" if open_data.get("sumario_distribuicao_mensal") else "indisponível",
+    }
+
+    contratos = {
+        "agregados_por_duracao": open_data.get("sumario_distribuicao_mensal"),
+        "status": "parcial" if open_data.get("sumario_distribuicao_mensal") else "indisponível",
     mcp = {
         "sumario_mensal": _safe_get(ccee, "mcp_summary"),
         "status": "parcial" if _safe_get(ccee, "mcp_summary") else "indisponível",

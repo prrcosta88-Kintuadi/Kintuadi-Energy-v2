@@ -24,6 +24,11 @@ class KintuadiIntegratedCollectorV2:
         # Cria diretórios necessários
         os.makedirs("data", exist_ok=True)
         os.makedirs("logs", exist_ok=True)
+        self.ons_collector = None
+        self.ccee_collector = None
+        self.analyzer = None
+        self.ons_collector_v2 = None
+        self.ccee_collector_v2 = None
         
         # Importa coletores otimizados
         try:
@@ -39,7 +44,7 @@ class KintuadiIntegratedCollectorV2:
             
             self.modules_loaded = True
             
-        except ImportError as e:
+        except Exception as e:
             logger.error(f"Erro ao carregar módulos: {e}")
             self.modules_loaded = False
     
@@ -68,6 +73,8 @@ class KintuadiIntegratedCollectorV2:
             
             # 1. Coleta ONS
             logger.info("\n[1/3] Coletando dados do ONS...")
+            ons_results = self.ons_collector.collect_reservoir_data()
+            ons_results["open_data_csv"] = self.ons_collector.collect_open_data_csv(limit=500)
             ons_results = self.ons_collector_v2.collect_reservoir_data()
             ons_results["open_data_csv"] = self.ons_collector_v2.collect_open_data_csv(limit=500)
             results['sources']['ons'] = ons_results
@@ -86,6 +93,8 @@ class KintuadiIntegratedCollectorV2:
             
             # 2. Coleta CCEE
             logger.info("\n[2/3] Coletando dados da CCEE...")
+            ccee_results = self.ccee_collector.collect_pld_data(days=7)
+            ccee_results["open_data_csv"] = self.ccee_collector.collect_open_data_csv(limit=500)
             ccee_results = self.ccee_collector_v2.collect_pld_data(days=7)
             ccee_results["open_data_csv"] = self.ccee_collector_v2.collect_open_data_csv(limit=500)
             results['sources']['ccee'] = ccee_results
