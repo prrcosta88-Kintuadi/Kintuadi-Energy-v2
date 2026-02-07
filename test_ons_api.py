@@ -263,6 +263,7 @@ ENERGIA_AGORA_ENDPOINTS = [
     "Geracao_Sul_Solar_json",
     "Geracao_Sul_Termica_json",
 ]
+
 CARGA_AGORA_ENDPOINTS = [
     "Carga_SIN_json",
     "Carga_Norte_json",
@@ -494,6 +495,7 @@ def test_energia_agora() -> None:
             print(f"⚠️ {endpoint}: sem registros (HTTP 204)")
             continue
 
+
         if response.status_code != 200:
             print(f"❌ {endpoint}: HTTP {response.status_code}")
             print(f"   Resposta: {response.text[:200]}")
@@ -610,6 +612,7 @@ def test_ons_api_direct() -> None:
     test_balanco_energetico()
 
     print("\n6. 📊 Testando volume útil histórico...")
+    print("\n4. 📊 Testando volume útil histórico...")
     reservatorio_id = "10"
     if reservatorios and isinstance(reservatorios[0], dict):
         reservatorio_id = str(reservatorios[0].get("id") or reservatorio_id)

@@ -36,8 +36,8 @@ class KintuadiIntegratedCollectorV2:
             from .ccee_collector_v2 import CCEEPLDCollector
             from .analyzer_v2 import EnergyMarketAnalyzer
             
-            self.ons_collector = ONSReservoirCollector(cache_ttl_minutes=30, enable_audit=True)
-            self.ccee_collector = CCEEPLDCollector(cache_ttl_minutes=60, enable_audit=True)
+            self.ons_collector_v2 = ONSReservoirCollector(cache_ttl_minutes=30, enable_audit=True)
+            self.ccee_collector_v2 = CCEEPLDCollector(cache_ttl_minutes=60, enable_audit=True)
             self.analyzer = EnergyMarketAnalyzer()
             self.ons_collector_v2 = self.ons_collector
             self.ccee_collector_v2 = self.ccee_collector
@@ -75,6 +75,8 @@ class KintuadiIntegratedCollectorV2:
             logger.info("\n[1/3] Coletando dados do ONS...")
             ons_results = self.ons_collector.collect_reservoir_data()
             ons_results["open_data_csv"] = self.ons_collector.collect_open_data_csv(limit=500)
+            ons_results = self.ons_collector_v2.collect_reservoir_data()
+            ons_results["open_data_csv"] = self.ons_collector_v2.collect_open_data_csv(limit=500)
             results['sources']['ons'] = ons_results
             
             # CORREÇÃO: Acessa status corretamente
@@ -93,6 +95,8 @@ class KintuadiIntegratedCollectorV2:
             logger.info("\n[2/3] Coletando dados da CCEE...")
             ccee_results = self.ccee_collector.collect_pld_data(days=7)
             ccee_results["open_data_csv"] = self.ccee_collector.collect_open_data_csv(limit=500)
+            ccee_results = self.ccee_collector_v2.collect_pld_data(days=7)
+            ccee_results["open_data_csv"] = self.ccee_collector_v2.collect_open_data_csv(limit=500)
             results['sources']['ccee'] = ccee_results
             
             # CORREÇÃO: Acessa status corretamente
