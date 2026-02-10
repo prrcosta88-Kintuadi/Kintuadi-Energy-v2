@@ -1,652 +1,1470 @@
-# dashboard_integrado.py - VERSÃO CORRIGIDA E ROBUSTA
+# dashboard_integrado.py — CORE REAL • ZERO DADOS FICTÍCIOS
+# VERSÃO REVISADA: Compatível com análise térmica v5 (dupla perspectiva)
+# COM BOTÃO DE ATUALIZAÇÃO E CARREGAMENTO DE ARQUIVO COMO FONTE PRINCIPAL
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import numpy as np
 import json
-from datetime import datetime
-import os
 import glob
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta
 import logging
-
+import streamlit.components.v1 as components
+from analises_tecnicas import mostrar_analises_tecnicas
 from scripts.core_analysis import build_core_analysis
-from scripts.premium_module import (
-    build_pld_lookup,
-    build_premium_summary,
-    calculate_exposures,
-    load_premium_excel,
-)
+from typing import Optional, Dict, List, Any, Union
 
-# Configura logging
+# -----------------------------------------------------------------------------
+# Configuração
+# -----------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuração da página
 st.set_page_config(
     page_title="Kintuadi Energy Intelligence",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# CSS melhorado
-st.markdown("""
-<style>
-    /* Tema escuro */
-    .stApp {
-        background-color: #0f172a;
-        color: #f8fafc;
+# -----------------------------------------------------------------------------
+# CSS Dinâmico baseado no config.toml
+# -----------------------------------------------------------------------------
+def load_custom_css():
+    """Carrega configurações CSS do config.toml e gera CSS dinâmico."""
+    
+    # Valores padrão (fallback)
+    css_config = {
+        "global_background": "#020617",
+        "global_text_color": "#e5e7eb",
+        "sidebar_background": "#020f2a",
+        "h1_size": "1.8rem",
+        "h3_size": "1.3rem",
+        "metric_label_size": "1rem",
+        "metric_value_size": "1.8rem",
+        "card_title_size": "1.1rem",
+        "section_title_size": "1.4rem",
+        "success_color": "#22c55e",
+        "warning_color": "#f59e0b",
+        "critical_color": "#ef4444",
+        "info_color": "#3b82f6",
+        "kpi_gradient_start": "#38bdf8",
+        "kpi_gradient_end": "#0ea5e9",
+        "card_border_radius": "10px",
+        "card_border_color": "rgba(255,255,255,0.08)",
+        "card_success_border": "#22c55e",
+        "card_warning_border": "#f59e0b",
+        "card_critical_border": "#ef4444",
+        "card_info_border": "#3b82f6",
     }
     
-    /* Cabeçalho */
-    .main-header {
-        background: linear-gradient(90deg, #00b4d8 0%, #0077b6 100%);
-        padding: 2rem;
-        border-radius: 16px;
-        text-align: center;
-        margin-bottom: 2rem;
-        box-shadow: 0 10px 25px rgba(0, 180, 216, 0.3);
-    }
+    # Tentar carregar do config.toml
+    try:
+        import toml
+        config_path = ".streamlit/config.toml"
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = toml.load(f)
+                
+            # Atualizar com valores do config.toml se existirem
+            if "custom_css" in config:
+                css_config.update(config["custom_css"])
+                
+            print(f"DEBUG: CSS Config carregada: {list(css_config.keys())}")
+    except ImportError:
+        print("DEBUG: Biblioteca toml não instalada. Use: pip install toml")
+    except Exception as e:
+        print(f"DEBUG: Erro ao carregar config.toml: {e}")
+    
+    # Gerar CSS dinâmico
+    css = f"""
+    <style>
+    .stApp {{ 
+        background-color:{css_config['global_background']}; 
+        color:{css_config['global_text_color']}; 
+    }}
+    
+    /* Sidebar */
+    section[data-testid="stSidebar"] {{ 
+        background-color:{css_config['sidebar_background']}; 
+        color: #ffffff !important;
+    }}
+    
+    section[data-testid="stSidebar"] * {{
+        color: #ffffff !important;
+    }}
+    
+    /* Cabeçalhos */
+    h1 {{
+        font-size: {css_config['h1_size']} !important;
+        color: #ffffff !important;
+        font-weight: 700 !important;
+        margin-bottom: 0.5rem !important;
+    }}
+    
+    h3 {{
+        font-size: {css_config['h3_size']} !important;
+        color: {css_config['global_text_color']} !important;
+        font-weight: 400 !important;
+        opacity: 0.9;
+        margin-top: 0 !important;
+    }}
     
     /* Cards */
-    .metric-card {
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 12px;
-        padding: 1.5rem;
-        border-left: 4px solid #00b4d8;
-        margin: 0.5rem 0;
-    }
+    .insight-card {{
+        background: linear-gradient(135deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
+        border-radius: {css_config['card_border_radius']};
+        padding: 1.1rem;
+        border: 1px solid {css_config['card_border_color']};
+    }}
     
-    .metric-card.critical {
-        border-left-color: #f44336;
-        background: linear-gradient(135deg, rgba(244, 67, 54, 0.1) 0%, rgba(244, 67, 54, 0.05) 100%);
-    }
+    .insight-card h4 {{
+        font-size: {css_config['card_title_size']};
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+        color: #ffffff !important;
+    }}
     
-    .metric-card.warning {
-        border-left-color: #ff9800;
-        background: linear-gradient(135deg, rgba(255, 152, 0, 0.1) 0%, rgba(255, 152, 0, 0.05) 100%);
-    }
+    .insight-card p {{
+        color: #ffffff !important;
+        opacity: 0.9;
+        font-size: 0.9rem;
+        margin-bottom: 0.3rem;
+    }}
     
-    .metric-card.success {
-        border-left-color: #4caf50;
-        background: linear-gradient(135deg, rgba(76, 175, 80, 0.1) 0%, rgba(76, 175, 80, 0.05) 100%);
-    }
+    .insight-card.success {{ border-left: 4px solid {css_config['card_success_border']}; }}
+    .insight-card.warning {{ border-left: 4px solid {css_config['card_warning_border']}; }}
+    .insight-card.critical {{ border-left: 4px solid {css_config['card_critical_border']}; }}
+    .insight-card.info {{ border-left: 4px solid {css_config['card_info_border']}; }}
     
-    .kpi-value {
-        font-size: 2.5rem;
-        font-weight: 800;
-        background: linear-gradient(90deg, #00b4d8, #0077b6);
+    .kpi-value {{
+        font-size: 1.4rem;
+        font-weight: 600;
+        background: linear-gradient(90deg, {css_config['kpi_gradient_start']}, {css_config['kpi_gradient_end']});
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        margin: 0.5rem 0;
-    }
+    }}
     
-    /* Containers */
-    .plot-container {
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 12px;
+    .section-title {{
+        font-size:{css_config['section_title_size']};
+        font-weight:700;
+        margin:1.0rem 0.5rem;
+        color: #ffffff !important;
+    }}
+    
+    /* Métricas */
+    [data-testid="metric-container"] {{
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-radius: 10px !important;
+        padding: 16px !important;
+        background-color: rgba(255, 255, 255, 0.03) !important;
+    }}
+    
+    [data-testid="stMetricLabel"], 
+    [data-testid="stMetricLabel"] p,
+    [data-testid="stMetricLabel"] div {{
+        color: #ffffff !important;
+        font-size: {css_config['metric_label_size']} !important;
+        font-weight: 600 !important;
+        opacity: 0.9;
+    }}
+    
+    [data-testid="stMetricValue"], 
+    [data-testid="stMetricValue"] > div,
+    [data-testid="stMetricValue"] p,
+    [data-testid="stMetricValue"] span {{
+        color: #ffffff !important;
+        font-size: {css_config['metric_value_size']} !important;
+        font-weight: 700 !important;
+    }}
+    
+    [data-testid="stMetricDelta"], 
+    [data-testid="stMetricDelta"] > div,
+    [data-testid="stMetricDelta"] svg {{
+        color: #ffffff !important;
+        fill: #ffffff !important;
+    }}
+    
+    [data-testid="stMetricDelta"] svg path {{
+        fill: #ffffff !important;
+    }}
+    
+    /* Análise PLD */
+    .pld-analysis-box {{
+        background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(30, 58, 138, 0.05));
+        border-radius: 10px;
         padding: 1.5rem;
+        margin: 1.5rem 0;
+        border-left: 4px solid {css_config['info_color']};
+    }}
+    
+    .pld-warning-box {{
+        background: linear-gradient(135deg, rgba(234, 179, 8, 0.1), rgba(202, 138, 4, 0.05));
+        border-radius: 10px;
+        padding: 1.2rem;
         margin: 1rem 0;
-    }
+        border-left: 4px solid {css_config['warning_color']};
+    }}
     
-    /* Tabelas */
-    .dataframe {
-        background-color: rgba(255, 255, 255, 0.05) !important;
-        color: white !important;
-    }
+    /* Tabela */
+    .kintuadi-table {{
+        width: 100%;
+        border-collapse: collapse;
+        background-color: {css_config['global_background']};
+        color: #ffffff !important;
+        font-size: 14px;
+    }}
     
-    .dataframe th {
-        background-color: rgba(0, 180, 216, 0.2) !important;
+    .kintuadi-table thead tr {{
+        background-color: {css_config['sidebar_background']};
+    }}
+    
+    .kintuadi-table th {{
+        color: #ffffff !important;
+        font-weight: 600;
+        padding: 8px 10px;
+        border: 1px solid #ffffff !important;
+        text-align: left;
+    }}
+    
+    .kintuadi-table td {{
+        padding: 8px 10px;
+        border: 1px solid #ffffff !important;
+        text-align: right;
+        background-color: {css_config['global_background']} !important;
+        color: #ffffff !important;
+    }}
+    
+    .kintuadi-table td:first-child {{
+        text-align: left;
+    }}
+    
+    .kintuadi-table tr:hover td {{
+        background-color: {css_config['sidebar_background']} !important;
+        color: #ffffff !important;
+    }}
+    
+    /* Badges */
+    .perspectiva-badge {{
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        border-radius: 12px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        margin: 0.2rem;
+        color: #ffffff !important;
+    }}
+    
+    .badge-sistema {{
+        background-color: rgba(59, 130, 246, 0.2);
+        color: #ffffff !important;
+        border: 1px solid rgba(59, 130, 246, 0.4);
+    }}
+    
+    .badge-gerador {{
+        background-color: rgba(16, 185, 129, 0.2);
+        color: #ffffff !important;
+        border: 1px solid rgba(16, 185, 129, 0.4);
+    }}
+    
+    /* Cards de perspectiva */
+    .card-perspectiva {{
+        background: linear-gradient(135deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+        border-radius: 10px;
+        padding: 1.2rem;
+        margin: 0.8rem 0;
+        border: 1px solid rgba(255,255,255,0.12);
+    }}
+    
+    .card-perspectiva * {{
+        color: #ffffff !important;
+    }}
+    
+    .card-sistema {{
+        border-left: 4px solid {css_config['info_color']};
+    }}
+    
+    .card-gerador {{
+        border-left: 4px solid #10b981;
+    }}
+    
+    /* Botões */
+    .update-button {{
+        background: linear-gradient(135deg, {css_config['info_color']}, #1d4ed8);
         color: white !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 8px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.3s;
+        width: 100%;
+        margin-top: 1rem;
+    }}
+    
+    .update-button:hover {{
+        background: linear-gradient(135deg, #2563eb, #1e40af);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    }}
+    
+    .update-button:active {{
+        transform: translateY(0);
+    }}
+    
+    .update-button:disabled {{
+        background: #6b7280;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+    }}
+    
+    /* Loading spinner */
+    .loading-spinner {{
+        display: inline-block;
+        width: 20px;
+        height: 20px;
+        border: 3px solid rgba(59, 130, 246, 0.3);
+        border-radius: 50%;
+        border-top-color: {css_config['info_color']};
+        animation: spin 1s ease-in-out infinite;
+        margin-right: 10px;
+    }}
+    
+    @keyframes spin {{
+        to {{ transform: rotate(360deg); }}
+    }}
+    
+    /* Outros elementos */
+    .streamlit-expanderHeader {{
+        color: #ffffff !important;
+    }}
+    
+    .streamlit-expanderContent * {{
+        color: #ffffff !important;
+    }}
+    
+    .pld-analysis-box h3,
+    .pld-analysis-box p,
+    .pld-analysis-box div {{
+        color: #ffffff !important;
+    }}
+    
+    /* Mensagens de status */
+    .stAlert {{
+        color: #ffffff !important;
+    }}
+    
+    .stSuccess {{
+        background-color: rgba(34, 197, 94, 0.2) !important;
+        border-color: {css_config['success_color']} !important;
+    }}
+    
+    .stError {{
+        background-color: rgba(239, 68, 68, 0.2) !important;
+        border-color: {css_config['critical_color']} !important;
+    }}
+    
+    .stWarning {{
+        background-color: rgba(245, 158, 11, 0.2) !important;
+        border-color: {css_config['warning_color']} !important;
+    }}
+    
+    .stInfo {{
+        background-color: rgba(59, 130, 246, 0.2) !important;
+        border-color: {css_config['info_color']} !important;
+    }}
+    </style>
+    """
+    
+    return css
 
-def load_latest_data():
-    """Carrega os dados mais recentes - VERSÃO ROBUSTA"""
+# Cabeçalho
+st.markdown("# 📊 Dashboard Principal - Kintuadi Energy Intelligence")
+st.markdown("### Análises a partir de dados do ONS e CCEE em tempo real")
+st.markdown("---")
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def load_latest_raw():
+    """Carrega os dados brutos mais recentes."""
     try:
-        data_dir = "data"
+        # Primeiro, tentar carregar do arquivo principal
+        if os.path.exists("data/kintuadi_latest.json"):
+            with open("data/kintuadi_latest.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                print(f"DEBUG: Dados brutos carregados. Tipo: {type(data)}")
+                return data
         
-        if not os.path.exists(data_dir):
-            st.error("❌ Pasta 'data' não encontrada.")
+        # Se não encontrar, buscar outros arquivos
+        files = glob.glob("data/kintuadi_*.json")
+        if not files:
+            print("DEBUG: Nenhum arquivo kintuadi_*.json encontrado")
             return None
+            
+        # Pegar o mais recente
+        latest_file = max(files, key=os.path.getctime)
+        with open(latest_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            print(f"DEBUG: Dados brutos carregados de arquivo histórico: {latest_file}")
+            return data
+            
+    except Exception as e:
+        print(f"DEBUG: Erro ao carregar dados brutos: {e}")
+        return None
+
+def load_core_analysis():
+    """Carrega a análise principal do arquivo JSON como fonte principal."""
+    core_file = "data/core_analysis_latest.json"
+    
+    if not os.path.exists(core_file):
+        print(f"DEBUG: Arquivo {core_file} não encontrado")
+        return None
+    
+    try:
+        with open(core_file, "r", encoding="utf-8") as f:
+            core = json.load(f)
         
-        # Procura diferentes padrões de arquivos
-        patterns = [
-            "kintuadi_dashboard_*.json",
-            "kintuadi_latest.json", 
-            "kintuadi_simple_*.json",
-            "kintuadi_*.json"
+        print(f"DEBUG: Core carregado do arquivo. Tipo: {type(core)}")
+        print(f"DEBUG: Timestamp do core: {core.get('timestamp', 'N/A')}")
+        
+        return core
+    except json.JSONDecodeError as e:
+        print(f"DEBUG: Erro ao decodificar JSON: {e}")
+        return None
+    except Exception as e:
+        print(f"DEBUG: Erro ao carregar core: {e}")
+        return None
+
+def run_data_collector():
+    """Executa o coletor de dados em um subprocesso."""
+    try:
+        # Verificar qual script de coleta está disponível
+        collector_scripts = [
+            "ons_collector_v2.py",
+            "ccee_collector_v2.py", 
+            "integrated_collector_v2.py"
         ]
         
-        for pattern in patterns:
-            files = glob.glob(os.path.join(data_dir, pattern))
-            if files:
-                latest_file = max(files, key=os.path.getmtime)
-                logger.info(f"Carregando: {os.path.basename(latest_file)}")
-                
-                with open(latest_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                
-                # Valida estrutura básica
-                if isinstance(data, dict):
-                    return data
-                
-        return None
+        script_to_run = None
+        for script in collector_scripts:
+            if os.path.exists(script):
+                script_to_run = script
+                break
         
+        if not script_to_run:
+            st.error("Nenhum script de coleta encontrado.")
+            return False
+        
+        # Executar o coletor
+        result = subprocess.run(
+            [sys.executable, script_to_run],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minutos timeout
+        )
+        
+        if result.returncode == 0:
+            print(f"DEBUG: Coletor executado com sucesso: {script_to_run}")
+            print(f"DEBUG: Saída: {result.stdout[:500]}...")
+            return True
+        else:
+            print(f"DEBUG: Erro no coletor: {result.stderr}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        print("DEBUG: Coletor expirou (timeout)")
+        return False
     except Exception as e:
-        logger.error(f"Erro ao carregar dados: {e}")
-        return None
+        print(f"DEBUG: Erro ao executar coletor: {e}")
+        return False
 
-def extract_data_for_display(raw_data):
-    """Extrai dados para exibição com fallbacks"""
-    if not raw_data:
-        return get_fallback_data()
+def update_analysis():
+    """Atualiza a análise executando o coletor e gerando nova análise."""
+    with st.spinner("🔄 Atualizando dados do sistema..."):
+        # Executar coletor
+        success = run_data_collector()
+        
+        if success:
+            # Carregar dados brutos atualizados
+            raw = load_latest_raw()
+            
+            if raw:
+                # Gerar nova análise
+                with st.spinner("📊 Gerando nova análise..."):
+                    new_core = build_core_analysis(raw)
+                    
+                    if new_core:
+                        st.success("✅ Análise atualizada com sucesso!")
+                        return new_core
+                    else:
+                        st.error("❌ Erro ao gerar nova análise.")
+                        return None
+            else:
+                st.error("❌ Não foi possível carregar dados após a coleta.")
+                return None
+        else:
+            st.error("❌ Falha na coleta de dados.")
+            return None
+
+def badge_status_sistema(classificacao: str, risco_sistêmico: str) -> str:
+    """
+    Determina a cor do badge baseado na classificação do SISTEMA.
+    """
+    if classificacao in ("risco_custo", "crítico"):
+        return "critical"
+    if classificacao in ("pressão_moderada", "atenção"):
+        return "warning"
+    if classificacao in ("folga_estrutural", "folga_operacional", "confortável", "abundante"):
+        return "success"
+    if risco_sistêmico == "alto":
+        return "critical"
+    if risco_sistêmico == "moderado":
+        return "warning"
+    if risco_sistêmico in ("baixo", "muito_baixo"):
+        return "success"
+    return ""
+
+def badge_status_gerador(perspectiva_gerador: str) -> str:
+    """
+    Determina a cor do badge baseado na perspectiva do GERADOR.
+    """
+    if perspectiva_gerador == "competitiva":
+        return "success"
+    if perspectiva_gerador == "estrutural":
+        return "info"  # Azul para indicar necessidade operacional
+    return ""
+
+def formatar_percentual_cvu_pld(percentual: Optional[float]) -> str:
+    """Formata o percentual CVU/PLD com interpretação."""
+    if percentual is None:
+        return "—"
     
-    try:
-        # Extrai dados ONS
-        ons_stats = raw_data.get('ons', {}).get('statistics', {}).get('geral', {})
-        volume_medio = ons_stats.get('volume_medio', 50)
-        status_sistema = ons_stats.get('status_sistema', 'N/A')
-        total_reservatorios = ons_stats.get('total_reservatorios', 0)
-        
-        # Extrai dados CCEE
-        ccee_stats = raw_data.get('ccee', {}).get('statistics', {}).get('geral', {})
-        pld_medio = ccee_stats.get('pld_medio', 150)
-        pld_registros = ccee_stats.get('quantidade', 0)
-        
-        # Extrai análise
-        analysis = raw_data.get('analysis', {})
-        tendencia = analysis.get('tendencia_mercado', 'N/A')
-        alerta = analysis.get('alerta', False)
-        indice_seguranca = analysis.get('indice_seguranca', 50)
-        
-        # Subsistemas
-        subsistemas = raw_data.get('ons', {}).get('subsistemas', {})
-        subsistema_stats = raw_data.get('ons', {}).get('statistics', {}).get('por_subsistema', {})
-        
-        # Submercados
-        submercados = raw_data.get('ccee', {}).get('statistics', {}).get('por_submercado', {})
-        
-        # Timeseries
-        timeseries = raw_data.get('ccee', {}).get('timeseries', [])
-        
-        return {
-            'ons': {
-                'volume_medio': volume_medio,
-                'status': status_sistema,
-                'total_reservatorios': total_reservatorios,
-                'subsistemas': subsistemas,
-                'subsistema_stats': subsistema_stats
-            },
-            'ccee': {
-                'pld_medio': pld_medio,
-                'registros': pld_registros,
-                'submercados': submercados,
-                'timeseries': timeseries
-            },
-            'analysis': {
-                'tendencia': tendencia,
-                'alerta': alerta,
-                'indice_seguranca': indice_seguranca,
-                'recomendacoes': analysis.get('recomendacoes', [])
-            },
-            'metadata': raw_data.get('metadata', {})
-        }
-        
-    except Exception as e:
-        logger.error(f"Erro ao extrair dados: {e}")
-        return get_fallback_data()
+    if percentual > 150:
+        return f"{percentual:.0f}% ⬇️"  # Seta para baixo = folga
+    elif percentual >= 100:
+        return f"{percentual:.0f}% ⚠️"  # Atenção
+    else:
+        return f"{percentual:.0f}%"
 
-def get_fallback_data():
-    """Dados de fallback caso não consiga carregar"""
-    return {
-        'ons': {
-            'volume_medio': 50,
-            'status': 'N/A',
-            'total_reservatorios': 0,
-            'subsistemas': {},
-            'subsistema_stats': {}
-        },
-        'ccee': {
-            'pld_medio': 150,
-            'registros': 0,
-            'submercados': {},
-            'timeseries': []
-        },
-        'analysis': {
-            'tendencia': 'DADOS NÃO DISPONÍVEIS',
-            'alerta': True,
-            'indice_seguranca': 0,
-            'recomendacoes': ['Execute o coletor primeiro']
-        },
-        'metadata': {'timestamp': 'N/A', 'status': 'error'}
+def interpretar_razao_cvu_pld(percentual: Optional[float]) -> str:
+    """Interpreta o percentual CVU/PLD em linguagem natural."""
+    if percentual is None:
+        return "Dados indisponíveis"
+    
+    if percentual > 150:
+        return "Folga Estrutural - Térmicas fora do despacho econômico"
+    elif percentual >= 100:
+        return f"CVU em {percentual:.0f}% do PLD - Risco de despacho com prejuízo"
+    elif percentual >= 95:
+        return f"CVU em {percentual:.0f}% do PLD - Pressão moderada"
+    elif percentual >= 80:
+        return f"CVU em {percentual:.0f}% do PLD - Atenção"
+    else:
+        return f"CVU em {percentual:.0f}% do PLD - Folga operacional"
+
+def analisar_formacao_preco_pld(core):
+    """Analisa a formação do preço do PLD com base nas correlações."""
+    mcp = core.get("mcp_economico", {})
+    
+    corr_carga = mcp.get("correlacoes", {}).get("pld_vs_carga")
+    corr_hidro = mcp.get("correlacoes", {}).get("pld_vs_hidraulica")
+    
+    # Valores absolutos para análise de força
+    abs_corr_carga = abs(corr_carga) if corr_carga is not None else 0
+    abs_corr_hidro = abs(corr_hidro) if corr_hidro is not None else 0
+    
+    resultados = {
+        "carga_explica": False,
+        "hidro_explica": False,
+        "analise": "",
+        "recomendacao": "",
+        "severidade": "info"  # info, warning, critical
     }
-
-
-def build_core_section(raw_data):
-    """Gera análises CORE com base em dados ONS + CCEE."""
-    if not raw_data:
-        return build_core_analysis({})
-    return build_core_analysis(raw_data)
-
-
-def load_premium_from_upload(uploaded_file, raw_data):
-    """Carrega dados PREMIUM via Excel e calcula exposições."""
-    if uploaded_file is None:
-        return None
-
-    try:
-        user_df = load_premium_excel(uploaded_file)
-    except Exception as exc:
-        st.error(f"Erro ao ler o Excel PREMIUM: {exc}")
-        return None
-
-    ccee_records = []
-    if raw_data:
-        ccee_records = raw_data.get("ccee", {}).get("data", [])
-        if not ccee_records and "sources" in raw_data:
-            ccee_records = raw_data.get("sources", {}).get("ccee", {}).get("data", [])
-
-    if not ccee_records:
-        st.warning("PLD horário não encontrado. Exposição financeira será calculada com PLD zero.")
-
-    pld_lookup = build_pld_lookup(ccee_records)
-    exposure_df = calculate_exposures(user_df, pld_lookup)
-    return build_premium_summary(exposure_df)
-
-def create_gauge_chart(value, title, min_val=0, max_val=100):
-    """Cria gráfico de gauge"""
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=value,
-        title={'text': title},
-        gauge={
-            'axis': {'range': [min_val, max_val]},
-            'bar': {'color': "#00b4d8"},
-            'steps': [
-                {'range': [0, 40], 'color': "#f44336"},
-                {'range': [40, 60], 'color': "#ff9800"},
-                {'range': [60, 80], 'color': "#ffc107"},
-                {'range': [80, 100], 'color': "#4caf50"}
-            ]
-        }
-    ))
     
-    fig.update_layout(
-        height=300,
-        paper_bgcolor='rgba(0,0,0,0)',
-        font={'color': "white"}
-    )
+    # Análise da correlação com carga
+    if corr_carga is not None:
+        if abs_corr_carga > 0.6:
+            resultados["carga_explica"] = True
+            if corr_carga > 0:
+                carga_analise = "PLD responde fortemente à variação da demanda"
+            else:
+                carga_analise = "PLD tem correlação negativa forte com a demanda (anômalo)"
+        elif abs_corr_carga > 0.3:
+            resultados["carga_explica"] = True
+            carga_analise = "Demanda tem influência moderada no PLD"
+        else:
+            carga_analise = "Demanda não explica o comportamento do PLD"
+    else:
+        carga_analise = "Correlação com demanda indisponível"
     
-    return fig
+    # Análise da correlação com hidrologia
+    if corr_hidro is not None:
+        if abs_corr_hidro > 0.6:
+            resultados["hidro_explica"] = True
+            if corr_hidro < 0:
+                hidro_analise = "PLD responde fortemente à hidrologia (comportamento esperado)"
+            else:
+                hidro_analise = "PLD tem correlação POSITIVA com hidrologia (ANÔMALO)"
+                resultados["severidade"] = "warning"
+        elif abs_corr_hidro > 0.3:
+            resultados["hidro_explica"] = True
+            hidro_analise = "Hidrologia tem influência moderada no PLD"
+        else:
+            hidro_analise = "Hidrologia não explica o comportamento do PLD"
+    else:
+        hidro_analise = "Correlação com hidrologia indisponível"
+    
+    # Determinar análise geral
+    if resultados["carga_explica"] and resultados["hidro_explica"]:
+        if abs_corr_carga > abs_corr_hidro:
+            resultados["analise"] = f"Formação de preço predominantemente CONJUNTURAL (demanda)"
+        else:
+            if corr_hidro < 0:
+                resultados["analise"] = f"Formação de preço predominantemente ESTRUTURAL (hidrologia)"
+            else:
+                resultados["analise"] = f"Formação ANÔMALA: PLD sobe com mais hidrologia"
+                resultados["severidade"] = "critical"
+    
+    elif resultados["carga_explica"]:
+        resultados["analise"] = f"Formação CONJUNTURAL: PLD segue principalmente a demanda"
+    
+    elif resultados["hidro_explica"]:
+        if corr_hidro < 0:
+            resultados["analise"] = f"Formação ESTRUTURAL: PLD determinado pela hidrologia"
+        else:
+            resultados["analise"] = f"Formação ANÔMALA: PLD sobe com mais água (investigar)"
+            resultados["severidade"] = "critical"
+    
+    else:
+        # Nenhuma correlação forte
+        resultados["analise"] = "Comportamento do PLD NÃO EXPLICADO por demanda ou hidrologia"
+        resultados["recomendacao"] = "Investigar outros fatores: restrições operacionais, térmicas marginais, fatores externos"
+        resultados["severidade"] = "warning"
+    
+    # Adicionar recomendações específicas
+    if not resultados["recomendacao"]:
+        if corr_hidro is not None and corr_hidro > 0.3:
+            resultados["recomendacao"] = "⚠️ INVESTIGAR: Correlação positiva com hidrologia é contra-intuitiva"
+            resultados["severidade"] = "critical"
+        elif corr_carga is not None and abs_corr_carga < 0.3 and corr_hidro is not None and abs_corr_hidro < 0.3:
+            resultados["recomendacao"] = "🔍 Investigar: PLD pode estar sendo determinado por fatores não capturados (térmicas, restrições, administração)"
+            resultados["severidade"] = "warning"
+    
+    return resultados, carga_analise, hidro_analise
 
+# -----------------------------------------------------------------------------
+# MAIN
+# -----------------------------------------------------------------------------
 def main():
-    """Função principal do dashboard"""
-    
-    # Cabeçalho
-    st.markdown('<div class="main-header"><h1>⚡ KINTUADI ENERGY INTELLIGENCE</h1><p>Plataforma de Análise do Mercado de Energia</p></div>', unsafe_allow_html=True)
-    
-    # Sidebar
+    # Carregar CSS dinâmico
+    css = load_custom_css()
+    st.markdown(css, unsafe_allow_html=True)
+
+    # Inicializar session state para controle de atualização
+    if 'updating' not in st.session_state:
+        st.session_state.updating = False
+    if 'last_update' not in st.session_state:
+        st.session_state.last_update = None
+
     with st.sidebar:
-        st.title("⚙️ Controles")
+        st.markdown("## ⚡ **KINTUADI**")
+        st.markdown("---")
         
-        # Botão para recarregar
-        if st.button("🔄 Atualizar Dados", use_container_width=True):
-            st.rerun()
+        # Navegação principal
+        if 'modo' not in st.session_state:
+            st.session_state.modo = "📊 Dashboard Principal"
         
-        st.divider()
+        modo = st.radio(
+            "Navegação Principal",
+            ["📊 Dashboard Principal", "🔬 Análises Técnicas"],
+            index=0 if st.session_state.modo == "📊 Dashboard Principal" else 1,
+            help="Selecione o modo de visualização",
+            key="modo_selector"
+        )
+        
+        # Atualizar session_state
+        st.session_state.modo = modo
+        
+        st.markdown("---")
         
         # Status do sistema
-        st.subheader("📊 Status do Sistema")
-        raw_data = load_latest_data()
+        st.markdown("### 📊 Status do Sistema")
         
-        if raw_data and raw_data.get('metadata', {}).get('status') != 'error':
-            st.success("✅ Dados carregados")
-            timestamp = raw_data.get('metadata', {}).get('timestamp', 'N/A')
-            st.caption(f"Última atualização: {timestamp}")
+        # Carregar a análise do arquivo como fonte principal
+        core = load_core_analysis()
+        
+        if core:
+            timestamp = core.get("timestamp", "")
+            if timestamp:
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime("%d/%m/%Y %H:%M:%S")
+                    st.success(f"✓ Dados de: {formatted_time}")
+                except:
+                    st.success(f"✓ Dados disponíveis")
+            
+            # Botão de atualização
+            if st.session_state.updating:
+                st.warning("🔄 Atualizando dados...")
+                if st.button("⏸️ Cancelar Atualização", disabled=True):
+                    st.session_state.updating = False
+            else:
+                if st.button("🔄 Atualizar Dados Agora", type="primary", use_container_width=True):
+                    st.session_state.updating = True
+                    st.rerun()
+            
+            st.markdown("---")
+            
         else:
-            st.error("❌ Sem dados")
-            st.caption("Execute o coletor primeiro")
+            st.error("❌ Análise não disponível")
+            st.markdown("---")
+            
+            # Botão para tentar gerar análise
+            if st.button("🔧 Gerar Análise Inicial", type="primary", use_container_width=True):
+                with st.spinner("Gerando análise inicial..."):
+                    raw = load_latest_raw()
+                    if raw:
+                        new_core = build_core_analysis(raw)
+                        if new_core:
+                            st.success("✅ Análise gerada com sucesso!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Falha ao gerar análise.")
+                    else:
+                        st.error("❌ Dados brutos não disponíveis.")
         
-        st.divider()
-        
-        # Ações rápidas
-        st.subheader("⚡ Ações Rápidas")
-        if st.button("📊 Executar Coletor", use_container_width=True):
-            st.info("Execute: python run_collector.py")
-        
-        if st.button("🔍 Ver Logs", use_container_width=True):
-            st.info("Verifique: logs/kintuadi.log")
+        st.markdown("---")
+        st.caption("Versão 2.0 • Dados em tempo real")
 
-        st.divider()
-        st.subheader("👤 PREMIUM")
-        st.caption("Importe o template Excel para análises personalizadas.")
-        premium_file = st.file_uploader(
-            "Template Excel (dados_usuario)",
-            type=["xlsx"],
-            accept_multiple_files=False,
-        )
-    
-    # Carrega e processa dados
-    raw_data = load_latest_data()
-    data = extract_data_for_display(raw_data)
-    core_analysis = build_core_section(raw_data or {})
-    premium_result = load_premium_from_upload(premium_file, raw_data)
-    
-    # Se não tem dados, mostra mensagem clara
-    if not raw_data or raw_data.get('metadata', {}).get('status') == 'error':
-        st.error("""
-        ## 📭 DADOS NÃO ENCONTRADOS
+    # Se está atualizando, mostrar tela de atualização
+    if st.session_state.updating:
+        st.markdown("# 🔄 Atualizando Dados do Sistema")
+        st.markdown("---")
         
-        **Para obter dados:**
+        with st.spinner("Executando coletor de dados e gerando nova análise..."):
+            # Executar atualização
+            new_core = update_analysis()
+            
+            # Atualizar estado
+            st.session_state.updating = False
+            st.session_state.last_update = datetime.now()
+            
+            if new_core:
+                st.success("✅ Atualização concluída com sucesso!")
+                st.balloons()
+                
+                # Recarregar a página após 2 segundos
+                st.info("📋 Recarregando dashboard...")
+                st.rerun()
+            else:
+                st.error("❌ Falha na atualização.")
+                if st.button("↻ Tentar Novamente"):
+                    st.session_state.updating = True
+                    st.rerun()
+                if st.button("📊 Voltar ao Dashboard"):
+                    st.session_state.updating = False
+                    st.rerun()
         
-        1. **Execute o coletor:**
+        return
+
+    # Se não tem core carregado, mostrar erro
+    if not core:
+        st.error("## ❌ Análise do Sistema Indisponível")
+        st.markdown("""
+        Não foi possível carregar a análise do sistema. Por favor:
+        
+        1. **Execute o coletor de dados** primeiro
+        2. Ou clique no botão "Gerar Análise Inicial" na sidebar
+        3. Ou verifique se o arquivo `data/core_analysis_latest.json` existe
+        
+        Para executar o coletor manualmente:
         ```bash
-        python run_collector.py
-        ```
-        
-        2. **Escolha opção 2** (apenas coletar dados)
-        
-        3. **Recarregue esta página**
-        
-        **Ou teste rápido:**
-        ```bash
-        python -c "from scripts.ccee_simple_collector import CCEESimpleCollector; c = CCEESimpleCollector(); c.collect_recent_pld()"
+        python coletor_unificado.py
         ```
         """)
+        return
+
+    # Roteamento para análises técnicas
+    if st.session_state.modo == "🔬 Análises Técnicas":
+        mostrar_analises_tecnicas(core)
+        return
+
+    # =========================================================================
+    # HEADER COM BOTÃO DE ATUALIZAÇÃO RÁPIDO
+    # =========================================================================
+    
+    st.markdown("---")
+
+    # =========================================================================
+    # PULSO DO SISTEMA - REVISADO
+    # =========================================================================
+    st.markdown('<div class="section-title">📈 Pulso do Sistema</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        hyd = core.get("hydrology", {})
+        ear = hyd.get("ear_medio")
+        ear_fmt = f"{ear:.2f}%" if isinstance(ear, (int, float)) else "—"
+
+        st.markdown(
+            f"""
+<div class="insight-card {badge_status_sistema(hyd.get('classificacao', {}).get('classe', ''), '')}">
+<h4>💧 Hidrologia</h4>
+<div class="kpi-value">{ear_fmt}</div>
+<p><strong>Classificação:</strong> {hyd.get('classificacao', {}).get('classe', 'indisponível').capitalize()}</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    with c2:
+        prices = core.get("prices", {})
+        pld = prices.get("pld_medio")
+        vol_norm = prices.get("pld_volatilidade_norm")
         
-        # Mostra dados de fallback para teste
-        st.warning("📊 **MODO DE DEMONSTRAÇÃO (dados simulados)**")
+        if vol_norm is not None:
+            vol_text = f"{vol_norm:.1f}% (banda)"
+        else:
+            vol_text = "—"
+
+        st.markdown(
+            f"""
+<div class="insight-card">
+<h4>💰 PLD Horário</h4>
+<div class="kpi-value">{f"R$ {pld:.2f}" if pld else "—"}</div>
+<p>Volatilidade: {vol_text}</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    with c3:
+        # NOVA ESTRUTURA: Análise térmica com dupla perspectiva
+        thermal = core.get("thermal_analysis", {})
+        analise_sistema = thermal.get("analise_sistema", {})
+        classificacao = analise_sistema.get("classificacao", "indisponível")
+        risco_sistêmico = analise_sistema.get("risco_sistêmico", "")
+        
+        # Obter percentual CVU/PLD
+        indicadores = thermal.get("indicadores_quantitativos", {})
+        percentual_cvu_pld = indicadores.get("percentual_cvu_pld")
+        
+        percentual_fmt = formatar_percentual_cvu_pld(percentual_cvu_pld)
+        
+        st.markdown(
+            f"""
+<div class="insight-card {badge_status_sistema(classificacao, risco_sistêmico)}">
+<h4>🔥 Relação CVU/PLD</h4>
+<div class="kpi-value">{percentual_fmt}</div>
+<p>
+<strong>Classificação:</strong> {classificacao.replace('_', ' ').title()}<br>
+</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    # =========================================================================
+    # EXPLICAÇÃO DOS CARDS - REVISADA
+    # =========================================================================
+    with st.expander("📖 Metodologia dos indicadores Pulso do Sistema"):
+        st.markdown("""
+        **Hidrologia:** Classificação baseada no EAR médio dos subsistemas, refletindo o nível de armazenamento e segurança hídrica do SIN.
+        
+        **PLD Horário:** Preço médio de liquidação das diferenças, calculado pela CCEE. Volatilidade normalizada considera a banda regulatória total.
+        
+        **Relação CVU/PLD:** - percentual do CVU em relação ao PLD:
+        - **< 80%:** Folga operacional (CVU significativamente menor que PLD)
+        - **80-95%:** Atenção (CVU próximo do PLD)
+        - **95-100%:** Pressão moderada (CVU muito próximo do PLD)
+        - **100-150%:** Risco de custos (CVU ≥ PLD, possível despacho com prejuízo)
+        - **> 150%:** Folga estrutural (CVU muito maior que PLD, térmicas fora do despacho econômico)
+        """)
+
+    # =========================================================================
+    # CICLO DO SIN
+    # =========================================================================
+    st.markdown('<div class="section-title">🌎 Ciclo do SIN</div>', unsafe_allow_html=True)
+
+    st.caption(
+        "O Ciclo do SIN integra hidrologia, estresse de carga e comportamento de preços, "
+        "permitindo identificar se o sistema opera em regime úmido, seco, crítico ou de transição."
+    )
+
+    cycle = core.get("sin_cycle", {})
+
+    if cycle:
+        st.markdown(
+            f"""
+<div class="insight-card">
+<h4>Regime Hidroenergético</h4>
+<div class="kpi-value">{cycle.get("cycle", "—").upper()}</div>
+<p>{cycle.get("description", "")}</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    # =========================================================================
+    # ANÁLISE DA FORMAÇÃO DO PREÇO DO PLD
+    # =========================================================================
+    st.markdown('<div class="section-title">🔍 Análise da Formação do Preço (PLD)</div>', unsafe_allow_html=True)
     
-    # KPIs PRINCIPAIS
-    st.subheader("📈 INDICADORES PRINCIPAIS")
+    formacao_resultados, carga_analise, hidro_analise = analisar_formacao_preco_pld(core)
     
-    col1, col2, col3, col4 = st.columns(4)
+    st.markdown(f'<div class="pld-analysis-box">', unsafe_allow_html=True)
+    st.markdown(f"### 📊 Comportamento do PLD")
+    
+    col1, col2 = st.columns(2)
     
     with col1:
-        volume = data['ons']['volume_medio']
-        status_class = "critical" if volume < 40 else "warning" if volume < 60 else "success" if volume > 70 else ""
+        mcp = core.get("mcp_economico", {})
+        corr = mcp.get("correlacoes", {})
         
-        st.markdown(f"""
-        <div class="metric-card {status_class}">
-            <h3>💧 Reservatórios SIN</h3>
-            <h1 class="kpi-value">{volume:.1f}%</h1>
-            <p>Status: {data['ons']['status']}</p>
-            <small>{data['ons']['total_reservatorios']} reservatórios</small>
-        </div>
-        """, unsafe_allow_html=True)
-    
+        corr_carga = corr.get("pld_vs_carga")
+        corr_hidro = corr.get("pld_vs_hidraulica")
+        
+        st.metric("PLD vs Carga", f"{corr_carga:.2f}" if corr_carga is not None else "—")
+        st.caption(carga_analise)
+        
     with col2:
-        pld = data['ccee']['pld_medio']
-        status_class = "critical" if pld > 300 else "warning" if pld > 200 else "success" if pld < 100 else ""
-        
-        st.markdown(f"""
-        <div class="metric-card {status_class}">
-            <h3>💰 PLD Médio</h3>
-            <h1 class="kpi-value">R$ {pld:.2f}</h1>
-            <p>Preço médio do MWh</p>
-            <small>{data['ccee']['registros']} registros</small>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("PLD vs Hidrologia", f"{corr_hidro:.2f}" if corr_hidro is not None else "—")
+        st.caption(hidro_analise)
     
-    with col3:
-        tendencia = data['analysis']['tendencia']
-        alerta = data['analysis']['alerta']
-        status_class = "critical" if alerta else "success"
-        
-        st.markdown(f"""
-        <div class="metric-card {status_class}">
-            <h3>📈 Tendência</h3>
-            <h2>{tendencia}</h2>
-            <p>{"⚠️ ALERTA ATIVO" if alerta else "✅ Sistema estável"}</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col4:
-        seguranca = data['analysis']['indice_seguranca']
-        status_class = "critical" if seguranca < 40 else "warning" if seguranca < 60 else "success"
-        
-        st.markdown(f"""
-        <div class="metric-card {status_class}">
-            <h3>🛡️ Segurança</h3>
-            <h1 class="kpi-value">{seguranca:.0f}/100</h1>
-            <div style="background: #333; border-radius: 5px; height: 10px; margin: 10px 0;">
-                <div style="background: {'#f44336' if seguranca < 40 else '#ff9800' if seguranca < 60 else '#4caf50'}; 
-                            width: {seguranca}%; height: 100%; border-radius: 5px;"></div>
-            </div>
-            <small>Índice de segurança energética</small>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # GRÁFICOS
     st.markdown("---")
-    st.subheader("📊 VISUALIZAÇÕES")
+    st.markdown(f"### 📈 **Análise Integrada**")
     
-    tab1, tab2, tab3 = st.tabs(["Análise", "Subsistemas", "Detalhes"])
+    severidade = formacao_resultados["severidade"]
+    if severidade == "critical":
+        st.error(f"🚨 {formacao_resultados['analise']}")
+    elif severidade == "warning":
+        st.warning(f"⚠️ {formacao_resultados['analise']}")
+    else:
+        st.info(f"ℹ️ {formacao_resultados['analise']}")
     
-    with tab1:
-        col1, col2 = st.columns(2)
+    if formacao_resultados["recomendacao"]:
+        st.markdown(f"**Recomendação:** {formacao_resultados['recomendacao']}")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # =========================================================================
+    # ANÁLISE TÉRMICA COM DUPLA PERSPECTIVA - REVISADA
+    # =========================================================================
+    st.markdown('<div class="section-title">🔥 Análise Térmica - Dupla Perspectiva</div>', unsafe_allow_html=True)
+    
+    thermal = core.get("thermal_analysis", {})
+    
+    if thermal:
+        # Informação de versão da análise
+        metadata = core.get("metadata", {})
+        if metadata.get("correcao_conceitual"):
+            st.success("✅ CVU alto vs PLD baixo = FOLGA (não risco)")
+        
+        # =============================================
+        # PERSPECTIVA DO SISTEMA (MODICIDADE TARIFÁRIA)
+        # =============================================
+        st.markdown("### 🏭 **Perspectiva do Sistema**")
+        st.markdown('<span class="perspectiva-badge badge-sistema">Modicidade Tarifária</span>', unsafe_allow_html=True)
+        
+        analise_sistema = thermal.get("analise_sistema", {})
+        contexto_hidrologico = thermal.get("contexto_hidrologico", {})
+        
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.markdown('<div class="plot-container">', unsafe_allow_html=True)
-            st.write("**💧 Volume dos Reservatórios**")
-            fig1 = create_gauge_chart(volume, "Volume Útil (%)")
-            st.plotly_chart(fig1, use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+            # Razão CVU/PLD
+            indicadores = thermal.get("indicadores_quantitativos", {})
+            percentual_cvu_pld = indicadores.get("percentual_cvu_pld")
+            percentual_fmt = formatar_percentual_cvu_pld(percentual_cvu_pld)
+            
+            st.metric("CVU/PLD", percentual_fmt, 
+                     delta=analise_sistema.get("classificacao", "").replace('_', ' ').title())
+            st.caption(interpretar_razao_cvu_pld(percentual_cvu_pld))
         
         with col2:
-            st.markdown('<div class="plot-container">', unsafe_allow_html=True)
-            st.write("**💰 Evolução do PLD**")
+            # Margem de segurança do sistema
+            margem_seguranca = indicadores.get("margem_seguranca_sistema")
+            margem_fmt = f"{margem_seguranca:.1f}%" if margem_seguranca is not None else "—"
             
-            # Gráfico de linha simples
-            if data['ccee']['timeseries']:
-                timeseries_data = data['ccee']['timeseries'][-7:]  # Últimos 7 dias
-                dates = [item['data'] for item in timeseries_data]
-                values = [item['pld_medio'] for item in timeseries_data]
-                
-                fig2 = go.Figure(data=go.Scatter(
-                    x=dates, y=values,
-                    mode='lines+markers',
-                    line=dict(color='#00b4d8', width=3),
-                    marker=dict(size=8, color='white')
-                ))
-                
-                fig2.update_layout(
-                    height=300,
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    font={'color': "white"},
-                    xaxis_title="Data",
-                    yaxis_title="R$/MWh",
-                    yaxis=dict(tickprefix="R$ ")
-                )
-                
-                st.plotly_chart(fig2, use_container_width=True)
-            else:
-                st.info("Sem dados históricos disponíveis")
+            st.metric("Margem Sistema", margem_fmt)
+            st.caption("(PLD-CVU)/PLD")
+        
+        with col3:
+            # Margem vs teto
+            margem_teto = indicadores.get("margem_vs_teto")
+            margem_teto_fmt = f"{margem_teto:.1f}%" if margem_teto is not None else "—"
+            
+            st.metric("Margem vs Teto", margem_teto_fmt)
+            st.caption("Segurança regulatória")
+        
+        with col4:
+            # Dependência térmica efetiva
+            dependencia = indicadores.get("dependencia_termica_efetiva")
+            dependencia_fmt = f"{dependencia:.2f}" if dependencia is not None else "—"
+            
+            st.metric("Dependência", dependencia_fmt)
+            st.caption("CVU>80% × (1-EAR)")
+        
+        # Descrição e recomendação do sistema
+        if analise_sistema.get("descricao"):
+            st.markdown('<div class="card-perspectiva card-sistema">', unsafe_allow_html=True)
+            st.markdown(f"**📋 Análise do Sistema:** {analise_sistema['descricao']}")
+            if analise_sistema.get("recomendacao"):
+                st.markdown(f"**🎯 Recomendação:** {analise_sistema['recomendacao']}")
             st.markdown('</div>', unsafe_allow_html=True)
-    
-    with tab2:
-        # Tabela de subsistemas
-        if data['ons']['subsistema_stats']:
-            subsistemas_data = []
-            for subsis, stats in data['ons']['subsistema_stats'].items():
-                subsistemas_data.append({
-                    'Subsistema': subsis,
-                    'Volume Médio (%)': stats.get('volume_medio', 0),
-                    'Status': stats.get('status', 'N/A'),
-                    'Reservatórios': stats.get('quantidade', 0)
-                })
-            
-            df_subsistemas = pd.DataFrame(subsistemas_data)
-            
-            # Aplica cores baseadas no volume
-            def color_volume(val):
-                if val < 40:
-                    color = '#f44336'
-                elif val < 60:
-                    color = '#ff9800'
-                elif val < 70:
-                    color = '#ffc107'
-                else:
-                    color = '#4caf50'
-                return f'background-color: {color}; color: white'
-            
-            styled_df = df_subsistemas.style.applymap(
-                color_volume, 
-                subset=['Volume Médio (%)']
-            ).format({'Volume Médio (%)': '{:.1f}%'})
-            
-            st.dataframe(styled_df, use_container_width=True)
-        else:
-            st.info("Sem dados de subsistemas disponíveis")
         
-        # Tabela de submercados
-        if data['ccee']['submercados']:
-            st.write("**💰 PLD por Submercado**")
-            submercados_data = []
-            for subm, stats in data['ccee']['submercados'].items():
-                submercados_data.append({
-                    'Submercado': subm,
-                    'PLD Médio (R$/MWh)': stats.get('pld_medio', 0),
-                    'Registros': stats.get('quantidade', 0)
-                })
+        # =============================================
+        # PERSPECTIVA DO GERADOR TÉRMICO
+        # =============================================
+        st.markdown("### ⚡ **Perspectiva do Gerador Térmico**")
+        st.markdown('<span class="perspectiva-badge badge-gerador">Viabilidade Econômica</span>', unsafe_allow_html=True)
+        
+        analise_gerador = thermal.get("analise_gerador", {})
+        dados_referencia = thermal.get("dados_referencia", {})
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Spread absoluto
+            spread = analise_gerador.get("spread_absoluto")
+            spread_fmt = f"R$ {spread:.1f}" if spread is not None else "—"
             
-            df_submercados = pd.DataFrame(submercados_data)
-            st.dataframe(df_submercados.style.format({'PLD Médio (R$/MWh)': 'R$ {:.2f}'}), use_container_width=True)
-    
-    with tab3:
-        # Debug info
-        with st.expander("🔍 Dados Técnicos (Debug)"):
-            if raw_data:
-                st.json(raw_data)
+            st.metric("Spread", spread_fmt, 
+                     delta=analise_gerador.get("perspectiva_gerador", "").title())
+            st.caption("PLD - CVU")
+        
+        with col2:
+            # Viabilidade econômica
+            viabilidade = analise_gerador.get("viabilidade_economica")
+            if viabilidade is True:
+                viabilidade_fmt = "✅ Econômica"
+            elif viabilidade is False:
+                viabilidade_fmt = "🔄 Estrutural"
             else:
-                st.write("Nenhum dado carregado")
+                viabilidade_fmt = "—"
+            
+            st.metric("Viabilidade", viabilidade_fmt)
+            st.caption("Perspectiva do gerador")
         
-        # Recomendações
-        st.write("**🎯 Recomendações Estratégicas**")
+        with col3:
+            # Valores absolutos
+            pld_medio = dados_referencia.get("pld_medio")
+            cvu_medio = dados_referencia.get("cvu_medio")
+            
+            st.metric("PLD vs CVU", 
+                     f"R$ {pld_medio:.1f}" if pld_medio else "—",
+                     delta=f"CVU: R$ {cvu_medio:.1f}" if cvu_medio else "—")
+            st.caption("Valores absolutos")
         
-        if data['analysis']['recomendacoes']:
-            for rec in data['analysis']['recomendacoes']:
-                st.write(f"- {rec}")
-        else:
-            if volume < 40:
-                st.error("""
-                **🔥 ALERTA CRÍTICO**
-                - Aumentar exposição ao mercado spot
-                - Preparar geração térmica
-                - Revisar contratos de fornecimento
-                """)
-            elif volume < 60:
-                st.warning("""
-                **⚠️ SISTEMA EM ALERTA**
-                - Monitorar preços diariamente
-                - Balancear contratação ACR/ACL
-                - Considerar ajustes na estratégia
-                """)
+        # Descrição da perspectiva do gerador
+        if analise_gerador.get("descricao"):
+            st.markdown('<div class="card-perspectiva card-gerador">', unsafe_allow_html=True)
+            st.markdown(f"**📋 Perspectiva do Gerador:** {analise_gerador['descricao']}")
+            
+            # Contexto hídrico
+            if contexto_hidrologico.get("interpretacao"):
+                st.markdown(f"**💧 Contexto Hídrico:** {contexto_hidrologico['interpretacao']}")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+    else:
+        st.warning("Dados de análise térmica não disponíveis.")
+
+    # =========================================================================
+    # RESUMO OPERACIONAL (ENERGIA AGORA)
+    # =========================================================================
+    st.markdown('<div class="section-title">📋 Resumo Operacional (Energia Agora)</div>', unsafe_allow_html=True)
+
+    gen = core.get("operacao", {}).get("generation", {})
+    
+    with st.container():
+        st.markdown('<div class="resumo-operacional">', unsafe_allow_html=True)
+        
+        if gen:
+            st.markdown("### ⚡ Distribuição da Geração do SIN")
+            
+            # Mapear as 5 fontes do SIN
+            fontes_sin = {
+                "hidraulica": {"nome": "Hidráulica", "icone": "💧", "cor": "#3b82f6"},
+                "termica": {"nome": "Térmica", "icone": "🔥", "cor": "#ef4444"},
+                "eolica": {"nome": "Eólica", "icone": "🌪️", "cor": "#22c55e"},
+                "solar": {"nome": "Solar", "icone": "☀️", "cor": "#f59e0b"},
+                "nuclear": {"nome": "Nuclear", "icone": "⚛️", "cor": "#a855f7"}
+            }
+            
+            # Coletar dados apenas das fontes do SIN
+            dados_fontes = {}
+            total_sin = 0
+            
+            for fonte_key, fonte_info in fontes_sin.items():
+                # Buscar dados específicos do SIN
+                sin_key = f"sin_{fonte_key}"
+                fonte_data = gen.get(sin_key) or gen.get(fonte_key)
+                
+                if fonte_data:
+                    media_mw = fonte_data.get("media", 0)
+                    dados_fontes[fonte_key] = {
+                        **fonte_info,
+                        "media_mw": media_mw,
+                        "rampa_max": fonte_data.get("rampa_max", 0)
+                    }
+                    total_sin += media_mw
+            
+            if dados_fontes and total_sin > 0:
+                # Calcular percentuais
+                for fonte_key in dados_fontes:
+                    dados_fontes[fonte_key]["percentual"] = (dados_fontes[fonte_key]["media_mw"] / total_sin * 100)
+                
+                # Ordenar por percentual (maior primeiro)
+                fontes_ordenadas = sorted(
+                    dados_fontes.items(),
+                    key=lambda x: x[1]["percentual"],
+                    reverse=True
+                )
+                
+                # Mostrar total em uma coluna
+                fontes_lista = []
+                for fonte_key, fonte_info in fontes_sin.items():
+                    if fonte_key in dados_fontes:
+                        fontes_lista.append(f"{fonte_info['icone']} {fonte_info['nome']}")
+                
+                fontes_texto = " + ".join(fontes_lista)
+                
+                st.markdown(f"""
+                <div style="text-align: center; padding: 1.5rem; background: rgba(30, 58, 138, 0.15); border-radius: 10px; margin: 1rem 0;">
+                    <div style="font-size: 0.9rem; color: #9ca3af; margin-bottom: 8px;">Geração Total SIN</div>
+                    <div style="font-weight: 700; font-size: 1.5rem; color: #60a5fa; margin-bottom: 8px;">{total_sin:,.0f} MW</div>
+                    <div style="font-size: 0.85rem; color: #9ca3af;">Potência total de: {fontes_texto}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Mostrar métricas para cada fonte
+                st.markdown("**📊 Participação por Fonte:**")
+                
+                # Criar 5 colunas para as 5 fontes
+                cols = st.columns(5)
+                
+                for idx, (fonte_key, dados) in enumerate(fontes_ordenadas):
+                    with cols[idx]:
+                        percentual = dados["percentual"]
+                        media_mw = dados["media_mw"]
+                        icone = dados["icone"]
+                        
+                        st.metric(
+                            label=f"{icone} {dados['nome']}",
+                            value=f"{percentual:.1f}%",
+                            delta=f"{media_mw:,.0f} MW",
+                            delta_color="normal"
+                        )
+                
             else:
-                st.success("""
-                **✅ SISTEMA ESTÁVEL**
-                - Oportunidade para contratos longos
-                - Momento para migração ao ACL
-                - Manter estratégia atual
+                st.info("""
+                ### ⚠️ Sem Dados de Geração
+                
+                Não foi possível calcular a distribuição da geração do SIN.
+                
+                **Verifique se os dados estão disponíveis:**
+                1. Hidráulica (SIN_Hidraulica)
+                2. Térmica (SIN_Termica)  
+                3. Eólica (SIN_Eolica)
+                4. Solar (SIN_Solar)
+                5. Nuclear (SIN_Nuclear)
                 """)
-
-    # CORE - análise sistêmica
-    st.markdown("---")
-    st.header("🌐 CORE — Visão Sistêmica do SIN")
-    hydrology = core_analysis.get("hydrology", {})
-    prices = core_analysis.get("prices", {})
-    alerts = core_analysis.get("alerts", [])
-
-    col_core_1, col_core_2, col_core_3 = st.columns(3)
-    with col_core_1:
-        st.subheader("💧 Hidrologia")
-        st.write(f"Volume médio: {hydrology.get('volume_medio', 'N/A')}")
-        conforto = hydrology.get("conforto_hidrico", {})
-        st.write(f"Conforto hídrico: {conforto.get('classe', 'N/A')}")
-        st.caption(conforto.get("descricao", ""))
-
-    with col_core_2:
-        st.subheader("💰 Preços (PLD)")
-        st.write(f"PLD médio: {prices.get('pld_medio', 'N/A')}")
-        st.write(f"Volatilidade: {prices.get('pld_volatilidade', 'N/A')}")
-        coerencia = prices.get("coerencia_fundamentos", {})
-        st.write(f"Coerência: {coerencia.get('coerencia', 'N/A')}")
-        st.caption(coerencia.get("descricao", ""))
-
-    with col_core_3:
-        st.subheader("🚨 Alertas estruturais")
-        if alerts:
-            for alert in alerts:
-                st.warning(alert)
+            
         else:
-            st.success("Sem alertas estruturais no CORE.")
+            st.info("### ⚠️ Dados Indisponíveis")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    st.subheader("📄 Indicadores CORE (MCP/Consumo/Perdas/Contratos)")
-    core_table = [
-        {"Indicador": "Contabilização montante perfil agente", "Status": core_analysis.get("mcp", {}).get("status", "N/A")},
-        {"Indicador": "Sumário balanço energético horário submercado", "Status": core_analysis.get("consumo", {}).get("status", "N/A")},
-        {"Indicador": "Sumário distribuição mensal", "Status": core_analysis.get("perdas", {}).get("status", "N/A")},
-        {"Indicador": "Sumário distribuição (contratos)", "Status": core_analysis.get("contratos", {}).get("status", "N/A")},
-    ]
-    st.dataframe(pd.DataFrame(core_table), use_container_width=True)
-
-    if prices.get("timeseries"):
-        st.subheader("📉 Série temporal do PLD (CORE)")
-        ts = prices.get("timeseries", [])
-        df_ts = pd.DataFrame(ts)
-        if not df_ts.empty:
-            fig_core = go.Figure(
-                data=go.Scatter(
-                    x=df_ts["data"],
-                    y=df_ts["pld_medio"],
-                    mode="lines+markers",
-                    line=dict(color="#00b4d8", width=2),
+    # =========================================================================
+    # VISUALIZAÇÕES DE GERAÇÃO E CARGA
+    # =========================================================================
+    st.markdown("### ⚙️ Geração Horária")
+    if gen:
+        fig = go.Figure()
+        
+        # Dicionário para abreviação de regiões
+        abreviacoes_regioes = {
+            "sudesteecentrooeste": "SE/CO",
+            "norte": "N",
+            "sul": "S", 
+            "nordeste": "NE",
+            "sin": "SIN"
+        }
+        
+        # Dicionário para nomes das fontes
+        nomes_fontes = {
+            "hidraulica": "HIDR",
+            "termica": "TERM",
+            "eolica": "EOL",
+            "solar": "SOL",
+            "nuclear": "NUC"
+        }
+        
+        for fonte_key, dados in gen.items():
+            # Ignorar dados totais do SIN
+            if fonte_key.startswith("sin_"):
+                continue
+            
+            df = pd.DataFrame(dados.get("serie", []))
+            
+            if df.empty:
+                continue
+                
+            # Extrair região e tipo de fonte
+            parts = fonte_key.split("_")
+            if len(parts) >= 2:
+                # Última parte é o tipo de fonte
+                tipo_fonte = parts[-1]
+                fonte_nome = nomes_fontes.get(tipo_fonte, tipo_fonte.upper())
+                
+                # Restante é a região
+                regiao_key = "_".join(parts[:-1])
+                regiao_nome = abreviacoes_regioes.get(regiao_key, regiao_key.upper())
+                
+                # Nome da legenda compacto
+                nome_legenda = f"{regiao_nome} - {fonte_nome}"
+            else:
+                nome_legenda = fonte_key.upper()
+            
+            fig.add_trace(
+                go.Bar(
+                    x=df["instante"],
+                    y=df["geracao"],
+                    name=nome_legenda,
+                    hoverinfo="x+y+name",
+                    hovertemplate="%{x|%H:%M}<br>%{y:,.0f} MW<extra>%{name}</extra>"
                 )
             )
-            fig_core.update_layout(
-                height=300,
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font={"color": "white"},
-                xaxis_title="Data",
-                yaxis_title="R$/MWh",
-                yaxis=dict(tickprefix="R$ "),
+        
+        fig.update_layout(
+            template="plotly_dark",
+            title="Geração por Fonte e Região",
+            xaxis_title="Hora",
+            yaxis_title="MW",
+            barmode="stack",
+            height=350,
+            legend=dict(
+                orientation="h",  # Horizontal
+                yanchor="top",    # Ancora no TOPO
+                y=-0.45,          # MAIS PARA BAIXO (2 quebras de linha)
+                xanchor="center", # Centralizado
+                x=0.5,
+                font=dict(size=10),
+                bgcolor="rgba(0,0,0,0.5)",  # Fundo semi-transparente
+                bordercolor="rgba(255,255,255,0.2)",
+                borderwidth=1
+            ),
+            margin=dict(t=50, b=150, l=50, r=80),  # Margem direita maior (r=80)
+            xaxis=dict(
+                tickformat="%H:%M",
+                tickangle=0,  # Inclinar labels para melhor leitura
+                tickfont=dict(size=10),
+                showgrid=True,
+                gridcolor="rgba(255,255,255,0.1)",
+                range=[None, None],  # Deixar espaço no final
+                rangeslider=dict(visible=False)
+            ),
+            yaxis=dict(
+                tickformat=",",
+                tickfont=dict(size=10),
+                showgrid=True,
+                gridcolor="rgba(255,255,255,0.1)",
+                zerolinecolor="rgba(255,255,255,0.2)"
             )
-            st.plotly_chart(fig_core, use_container_width=True)
-
-    # PREMIUM - análise personalizada
-    st.markdown("---")
-    st.header("👤 PREMIUM — Visão Personalizada")
-    if premium_result is None:
-        st.info("Envie o template Excel no sidebar para ativar a visão PREMIUM.")
+        )
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        resumo = premium_result.resumo
-        col_p1, col_p2, col_p3 = st.columns(3)
-        with col_p1:
-            st.metric("Exposição energética (MWh)", f"{resumo.get('total_exposicao_mwh', 0):,.2f}")
-        with col_p2:
-            st.metric("Exposição financeira (R$)", f"{resumo.get('total_exposicao_financeira', 0):,.2f}")
-        with col_p3:
-            st.metric("Underhedge", resumo.get("linhas_underhedge", 0))
-
-        if premium_result.alertas:
-            for alert in premium_result.alertas:
-                st.warning(alert)
-
-        df_exposure = premium_result.data.copy()
-        if not df_exposure.empty:
-            st.subheader("📌 Exposição horária (amostra)")
-            st.dataframe(df_exposure.head(10), use_container_width=True)
+        st.info("Dados de geração não disponíveis.")
     
-    # Rodapé
+    st.markdown("### 🔌 Carga Horária")
+    load = core.get("operacao", {}).get("load", {})
+    if load:
+        fig = go.Figure()
+        
+        for area, dados in load.items():
+            # Ignorar carga total do SIN
+            if area.lower() == "sin":
+                continue
+            
+            df = pd.DataFrame(dados.get("serie", []))
+            
+            if df.empty:
+                continue
+            
+            # Aplicar abreviação para a região
+            area_nome = abreviacoes_regioes.get(area.lower(), area.upper())
+            
+            fig.add_trace(
+                go.Bar(
+                    x=df["instante"],
+                    y=df["carga"],
+                    name=area_nome,
+                    hoverinfo="x+y+name",
+                    hovertemplate="%{x|%H:%M}<br>%{y:,.0f} MW<extra>%{name}</extra>"
+                )
+            )
+        
+        fig.update_layout(
+            template="plotly_dark",
+            title="Carga por Submercado",
+            xaxis_title="Hora",
+            yaxis_title="MW",
+            barmode="stack",
+            height=350,
+            legend=dict(
+                orientation="h",  # Horizontal
+                yanchor="top",    # Ancora no TOPO
+                y=-0.45,          # MAIS PARA BAIXO
+                xanchor="center", # Centralizado
+                x=0.5,
+                font=dict(size=10),
+                bgcolor="rgba(0,0,0,0.5)",
+                bordercolor="rgba(255,255,255,0.2)",
+                borderwidth=1
+            ),
+            margin=dict(t=50, b=150, l=50, r=80),  # Margem direita maior
+            xaxis=dict(
+                tickformat="%H:%M",
+                tickangle=0,
+                tickfont=dict(size=10),
+                showgrid=True,
+                gridcolor="rgba(255,255,255,0.1)",
+                range=[None, None]
+            ),
+            yaxis=dict(
+                tickformat=",",
+                tickfont=dict(size=10),
+                showgrid=True,
+                gridcolor="rgba(255,255,255,0.1)",
+                zerolinecolor="rgba(255,255,255,0.2)"
+            )
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Dados de carga não disponíveis.")
+
+    # =========================================================================
+    # GRAFICO PLD POR SUBMERCADO
+    # =========================================================================
+    st.markdown('<div class="section-title">🌐 PLD Horário por Submercado</div>', unsafe_allow_html=True)
+
+    pld_ts = core.get("prices", {}).get("pld_horario_7d", {})
+
+    if pld_ts:
+        fig = go.Figure()
+        for sm, serie in pld_ts.items():
+            df = pd.DataFrame(serie)
+            if "instante" not in df.columns or df.empty:
+                continue
+                
+            df["instante"] = pd.to_datetime(df["instante"])
+            fig.add_trace(
+                go.Scatter(
+                    x=df["instante"],
+                    y=df["pld"],
+                    mode="lines",
+                    name=sm,
+                )
+            )
+        fig.update_layout(
+            template="plotly_dark",
+            xaxis_title="Data",
+            yaxis_title="R$/MWh",
+            title="Últimos 7 dias",
+            height=300
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Série temporal de PLD indisponível.")
+    
+    # =========================================================================
+    # MCP ECONÔMICO
+    # =========================================================================
+    st.markdown('<div class="section-title">📊 MCP Econômico</div>', unsafe_allow_html=True)
+    mcp = core.get("mcp_economico", {})
+
+    if mcp:
+        c1, c2, c3 = st.columns(3)
+        
+        with c1:
+            
+            st.markdown(
+            f"""
+<div class="insight-card">
+<h4>Regime do MCP</h4>
+<div class="kpi-value">{mcp.get("regime_mcp", "—").upper()}</div>
+<p>Condição estrutural do mercado</p>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+        
+        with c2:
+
+            si = mcp.get("stress_index")
+            st.markdown(
+                f"""
+<div class="insight-card">
+<h4>Stress Index</h4>
+<div class="kpi-value">{f"{si:.2f}" if si else "—"}</div>
+<p>Demanda / Oferta hidráulica</p>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+        with c3:
+            corr = mcp.get("correlacoes", {})
+            st.markdown(
+                f"""
+<div class="insight-card">
+<h4>Correlação PLD × Hidro</h4>
+<div class="kpi-value">
+{f"{corr.get('pld_vs_hidraulica'):.2f}" if corr.get("pld_vs_hidraulica") is not None else "—"}
+</div>
+<p>Sensibilidade do preço à hidrologia</p>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+    # =========================================================================
+    # LIMITES REGULATÓRIOS
+    # =========================================================================
+    st.markdown('<div class="section-title">📏 Limites Regulatórios do PLD (2026)</div>', unsafe_allow_html=True)
+    
+    prices = core.get("prices", {})
+    limites = prices.get("limites_regulatorios", {})
+    pld_medio = prices.get("pld_medio")
+    
+    if limites and pld_medio:
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Piso", f"R$ {limites.get('piso', 58.60):.2f}")
+        
+        with col2:
+            st.metric("PLD Médio", f"R$ {pld_medio:.2f}")
+        
+        with col3:
+            st.metric("Teto Estrutural", f"R$ {limites.get('teto_estrutural', 751.73):.2f}")
+        
+        with col4:
+            st.metric("Teto Horário", f"R$ {limites.get('teto_horario', 1542.23):.2f}")
+
+    # =========================================================================
+    # METADATA
+    # =========================================================================
+    with st.expander("ℹ️ Metadados do CORE"):
+        st.json(core.get("metadata", {}))
+
     st.markdown("---")
-    st.caption(f"""
-    ⚡ **Kintuadi Energy Platform v2.0** | Dados em tempo real | 
-    Última atualização: {data['metadata'].get('timestamp', 'N/A')} | 
-    Desenvolvido para gestores de energia
-    """)
 
 if __name__ == "__main__":
     main()

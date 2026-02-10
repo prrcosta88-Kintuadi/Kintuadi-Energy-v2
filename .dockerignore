@@ -1,0 +1,19 @@
+# .dockerignore
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.env
+.git/
+.gitignore
+.DS_Store
+*.log
+*.csv
+*.json
+data/  # Ignora dados locais
+test/
+tmp/

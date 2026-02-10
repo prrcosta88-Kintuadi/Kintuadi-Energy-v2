@@ -1,0 +1,202 @@
+{
+  "contabilizacao_montante_perfil_agente_json": {
+    "success": true,
+    "status_code": 200,
+    "total": 200000,
+    "sample_count": 2,
+    "first_record": {
+      "_id": 1,
+      "MES_REFERENCIA": "202512",
+      "COD_AGENTE": 3,
+      "NOME_EMPRESARIAL": "RGE SUL DISTRIBUIDORA DE ENERGIA S.A.",
+      "COD_PERF_AGENTE": 3,
+      "SIGLA_PERFIL_AGENTE": "RGE SUL",
+      "CNPJ": "02016440000162",
+      "VALOR_TM_MCP": 303138.56,
+      "COMPENSACAO_MRE": null,
+      "VALOR_ENCARGO": 65343.49,
+      "VALOR_AJUSTE_EXPOSICAO": 66752.11,
+      "VALOR_AJUSTE_ALIVIO_RET": 0,
+      "EFEITO_CONTRAT_DISP": -10404795.26,
+      "EFEITO_CONTRAT_COTA_GF": -2430096.82,
+      "EFEITO_CONTRAT_NUCLEAR": 483552.98,
+      "AJUSTE_RECONTAB": -33307.16,
+      "AJUSTE_MCSD_EX": null,
+      "RESULTADO_FINANCEIRO_ER": 0,
+      "EFEITO_CCEARQ": null,
+      "EFEITO_CONTRAT_ITAIPU": -5346224.36,
+      "EFEITO_REPASSE_RISCO_HIDRO": -5118869.31,
+      "EFEITO_DESLOC_PLD_CMO": -138503.62,
+      "RESULTADO_FINAL": -22755528.88
+    }
+  },
+  "contabilizacao_montante_perfil_agente_show": {
+    "success": true,
+    "name": "contabilizacao_montante_perfil_agente_2025",
+    "format": "CSV",
+    "csv_url": "https://pda-download.ccee.org.br/WC2yBb26QdmIwqoaD8lOPg/content",
+    "formats_available": [
+      "CSV",
+      "API/JSON"
+    ],
+    "datastore_active": true,
+    "full_resource": {
+      "cache_last_updated": null,
+      "cache_url": null,
+      "created": "2025-03-05T23:50:27.141359",
+      "datastore_active": true,
+      "description": "**Objetivo**: Detalhar os dados de montantes dos resultados consolidados da contabilização por perfil de agente.  \n \n **Campos contidos nesse conjunto de dados:** \n  \n * **MES_REFERENCIA** : Representa o mês e o ano de referência na qual os dados foram utilizados.   \n * **COD_AGENTE** : Corresponde ao código numérico inteiro utilizado pela CCEE para identificar o agente em seus sistemas.   \n * **NOME_EMPRESARIAL** : Corresponde a razão social cadastrada pelo agente na CCEE.   \n * **COD_PERF_AGENTE** : Corresponde ao código numérico inteiro utilizado pela CCEE para identificar o perfil do agente em seus sistemas.   \n * **SIGLA_PERFIL_AGENTE** : Corresponde a sigla adotada pela CCEE para identificar o perfil de agente em seus sistemas.   \n * **CNPJ** : Corresponde ao CNPJ cadastrado pelo agente nos sistemas da CCEE.   \n * **VALOR_TM_MCP** : Corresponde ao Total Mensal do Resultado no Mercado de Curto Prazo do perfil de agente “a”, no mês de apuração “m” TM_MCPa,m [R$]   \n * **COMPENSACAO_MRE** : Corresponde a Compensação do MRE do perfil de agente “a”, no mês de apuração “m” COMPENSAÇÃO_MREa,m [R$]   \n * **VALOR_ENCARGO** : Corresponde ao Total de Encargos Consolidado do perfil de agente “a”, no mês de apuração “m” ENCARGOSa,m [R$]   \n * **VALOR_AJUSTE_EXPOSICAO** : Corresponde ao total de ajustes a serem efetuados na contabilização de um perfil de agente “a” face às exposições financeiras positivas e negativas apuradas e em função dos recursos disponíveis para alocação. É calculado no mês de apuração “m” TAJ_EFa,m [R$]   \n * **VALOR_AJUSTE_ALIVIO_RET** : Corresponde ao Total de Ajustes Referente ao Alívio Retroativo do perfil de agente “a”, no mês de apuração “m” TAJ_ARa,m [R$]   \n * **EFEITO_CONTRAT_DISP** : Corresponde ao Efeito do CCEAR por disponibilidade ou CER para cada perfil de agente “a”, no mês de apuração “m” ECDa,m [R$]   \n * **EFEITO_CONTRAT_COTA_GF** : Corresponde ao Efeito do CCGF para cada perfil de agente “a”, no mês de apuração “m” ECCGFa,m [R$]   \n * **EFEITO_CONTRAT_NUCLEAR** : Corresponde ao Efeito do CCEN para o perfil de agente “a”, no mês de apuração “m” ECCENa,m [R$]   \"\"\n * **AJUSTE_RECONTAB** : Corresponde ao Valor calculado pela CCEE referente a ajustes, decorrentes de recontabilizações, em montantes a pagar ou a receber, atribuído ao perfil de agente “a”, no mês de apuração “m” AJU_RECONa,m [R$]  \"\" \"\"\n * **AJUSTE_MCSD_EX** : Corresponde ao Valor resultante ao processamento do Mecanismo de Compensação de Sobras e Déficits Ex-Post, referente às trocas de energia entre os agentes cedentes (positivos) e cessionários (negativos) de CCEARs por quantidade, atribuído ao perfil de agente “a”, no mês de janeiro de cada ano MCSD_XPa,m [R$]  \"\" \"\"\n * **RESULTADO_FINANCEIRO_ER** : Corresponde ao Montante financeiro restituído aos agentes pagadores de Encargos de Energia de Reserva por sobras previstas na CONER, apurada para cada perfil de agente “a”, no mês “m” RES_EXCD_ERα,m [R$]  \"\" \n * **EFEITO_CCEARQ** : Corresponde ao Efeito do CCEAR Quantidade de Usinas Aptas, para cada perfil de agente “a”, no mês de apuração “m” ECQAa,m [R$]   \n * **EFEITO_CONTRAT_ITAIPU** : Corresponde ao Efeito da Contratação de Itaipu, para cada perfil de agente “a”, no mês de apuração “m” EC_ITa,m [R$]   \n * **EFEITO_REPASSE_RISCO_HIDRO** : Corresponde ao Efeito do Repasse do Risco Hidrológico do ACR, para cada perfil de agente “a”, no mês de apuração “m” ERRHa,m [R$]   \n * **EFEITO_DESLOC_PLD_CMO** : Corresponde ao Efeito total dos custos devido ao descolamento entre PLD e CMO do perfil de agente “a”, no mês de apuração “m” E_DESCa,m [R$]   \n * **RESULTADO_FINAL** : Corresponde ao Resultado Final do perfil de agente “a”, no mês de apuração “m” RESULTADOa,m [R$]",
+      "format": "CSV",
+      "hash": "",
+      "id": "76d1cf4c-da8c-47a5-9f0d-8b50079be960",
+      "last_modified": "2026-02-02T17:36:17.175000",
+      "metadata_modified": "2026-02-02T20:36:17.278086",
+      "mimetype": null,
+      "mimetype_inner": null,
+      "name": "contabilizacao_montante_perfil_agente_2025",
+      "package_id": "9089c21c-07c7-4058-bfc8-14524baf28c8",
+      "position": 1,
+      "resource_type": null,
+      "size": null,
+      "state": "active",
+      "url": "https://pda-download.ccee.org.br/WC2yBb26QdmIwqoaD8lOPg/content",
+      "url_type": null
+    }
+  },
+  "contabilizacao_montante_perfil_agente_csv": {
+    "success": false,
+    "error": "Content-Type não é CSV: application/json;charset=UTF-8",
+    "content_type": "application/json;charset=UTF-8",
+    "first_bytes": "b'\\x1f\\x8b\\x08\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\xcc\\xbd\\xcb\\x96\"\\xbb\\x92-\\xda\\xbf_A\\xeb\\xf4\\xa0\\xf4~\\x0coy\\x10\\x9e\\x91d\\x11\\xc0\\x06\"k\\xd5\\xea\\xaco=\\xe36\\xeeo]\\x9b&w\\x90\\xe4\\x0e\\x01$\\x11{\\xd7:\\xa7*\\xc3]\\xf84I&\\x93\\x99d\\x8f\\xf7\\xee\\xf0\\xcf\\xbe\\xfb\\xd1\\xed\\xbb\\xcdr\\xd56\\xcb\\xed\\xeb?\\xed[\\xb79v\\xcdf\\xfb\\xde\\xfd'"
+  },
+  "sumario_balanco_energetico_horario_json": {
+    "success": true,
+    "status_code": 200,
+    "total": 35040,
+    "sample_count": 2,
+    "first_record": {
+      "_id": 1,
+      "MES_REFERENCIA": "202512",
+      "PERIODO_COMERCIALIZACAO": 1,
+      "SUBMERCADO": "NORDESTE",
+      "BE_POSITIVO": 31523.529224,
+      "BE_NEGATIVO": -27338.404931,
+      "RESULTADO_MCP": 1378412.39
+    }
+  },
+  "sumario_balanco_energetico_horario_show": {
+    "success": true,
+    "name": "sumario_be_horario_submercado_2025",
+    "format": "CSV",
+    "csv_url": "https://pda-download.ccee.org.br/v80VsbUJSOG1-uhPvGAHdg/content",
+    "formats_available": [
+      "CSV",
+      "API/JSON"
+    ],
+    "datastore_active": true,
+    "full_resource": {
+      "cache_last_updated": null,
+      "cache_url": null,
+      "created": "2025-03-05T23:40:50.749952",
+      "datastore_active": true,
+      "description": "**Objetivo**: Detalhar o balanço energético e resultado do MCP por submercado e por período de comercialização (j)  \n  \n**Campos contidos nesse Dataset:**  \n  \n* **MES_REFERENCIA** : Representa o mês e o ano de referência na qual os dados foram utilizados.  \n* **PERIODO_COMERCIALIZACAO** : Representa o período de comercialização, equivalente a uma hora, dentro do mês e o ano de referência na qual os dados foram utilizados.  \n* **SUBMERCADO** : Representa os quatro (4) submercados de atuação no SIN  - Sistema Interligado Nacional correspondentes a Norte (N), Nordeste (NE), Sul (S) e Sudeste (SE).  \n* **BE_POSITIVO** : Corresponde ao Balanço Energético positivo do perfil de agente “a” no submercado “s” para o período de comercialização “j”  (NETa,s,j) [MWh] (1)  \n* **BE_NEGATIVO** : Corresponde ao Balanço Energético negativo do perfil de agente “a” no submercado “s” para o período de comercialização “j”  (NETa,s,j) [MWh] (1)  \n* **RESULTADO_MCP** : Corresponde ao Resultado no Mercado de Curto Prazo do perfil de agente “a”, no submercado “s”, por período de comercialização “j”  (MCPa,s,j) [R$]  \n  \n(1) Considera apenas com valores positivos de cada hora, submercado, perfil",
+      "format": "CSV",
+      "hash": "",
+      "id": "9418da65-0f9f-4f66-a43f-6517db9653f3",
+      "last_modified": "2026-02-02T17:37:53.417000",
+      "metadata_modified": "2026-02-02T20:38:22.231322",
+      "mimetype": null,
+      "mimetype_inner": null,
+      "name": "sumario_be_horario_submercado_2025",
+      "package_id": "2212404d-09d0-406c-945e-bb070eb48ae4",
+      "position": 2,
+      "resource_type": null,
+      "size": null,
+      "state": "active",
+      "url": "https://pda-download.ccee.org.br/v80VsbUJSOG1-uhPvGAHdg/content",
+      "url_type": null
+    }
+  },
+  "sumario_balanco_energetico_horario_csv": {
+    "success": false,
+    "error": "Content-Type não é CSV: application/json;charset=UTF-8",
+    "content_type": "application/json;charset=UTF-8",
+    "first_bytes": "b'\\x1f\\x8b\\x08\\x00\\x00\\x00\\x00\\x00\\x00\\x00d\\xfd\\xcb\\xaeeI\\x93\\x9c\\t\\xce\\xfb]|\\xc3\\xee\\x17\\x9c\\x11\\x8b\\xfc\\xab\\x90@\\x91Id\\xb2j\\xd0\\x13\\xbe\\xff[\\xb4|b\\xc7\\xb7\\xa9E3\\x01fF\\x84\\x9b\\xaf\\xb5m\\xa9\\xa9\\xa9\\x8a\\x8a\\x8a\\xfe\\xf7\\x7f\\xfd\\xe7\\xff\\xfe\\x8f\\x7f\\xfd\\x9f\\xff\\xfa\\x8f\\x7f\\xfd\\x8f\\xff\\xfao\\xff\\xe5\\xe7\\x7f\\xfe\\xeb?\\xfe\\xed\\xdf\\xff\\xdb\\xbf\\xff\\xef'"
+  },
+  "sumario_distribuicao_mensal_json": {
+    "success": true,
+    "status_code": 200,
+    "total": 12,
+    "sample_count": 2,
+    "first_record": {
+      "_id": 1,
+      "MES_REFERENCIA": "202512",
+      "RESULTADO_MCP_RECEBIMENTO": 363989262.61,
+      "RESULTADO_MCP_PAGAMENTO": -186786745.6,
+      "ENCARGOS_RECEBIMENTO_DIST": 3284768.62,
+      "ENCARGOS_PAGAMENTO_DIST": 0,
+      "EXPOSICAO_FINANCEIRA_RECEBIMENTO": 140826.12,
+      "EXPOSICAO_FINANCEIRA_PAGAMENTO": 3416004.99,
+      "ALIVIO_RETROATIVO_RECEBIMENTO": 0,
+      "ALIVIO_RETROATIVO_PAGAMENTO": 0,
+      "EFEITO_CONTRATACAO_DISP_RECEBIMENTO": 0,
+      "EFEITO_CONTRATACAO_DISP_PAGAMENTO": -1273465113.25,
+      "EFEITO_CONTRATACAO_CCGF_RECEBIMENTO": 0,
+      "EFEITO_CONTRATACAO_CCGF_PAGAMENTO": -130620058.15,
+      "EFEITO_CONTRATACAO_CCEN_RECEBIMENTO": 42078732.81,
+      "EFEITO_CONTRATACAO_CCEN_PAGAMENTO": 0,
+      "AJUSTE_RECONTAB_RECEBIMENTO": 1151707.08,
+      "AJUSTE_RECONTAB_PAGAMENTO": -21271071.61,
+      "AJUSTE_MCSD_XP_RECEBIMENTO": 0,
+      "AJUSTE_MCSD_XP_PAGAMENTO": 0,
+      "RESULTADO_EXCEDENTE_ER_RECEBIMENTO": 0,
+      "EFEITO_CONTRATACAO_QTD_PAGAMENTO": 0,
+      "EFEITO_CONTRATACAO_ITAIPU_RECEBIMENTO": 0,
+      "EFEITO_CONTRATACAO_ITAIPU_PAGAMENTO": -163643030.63,
+      "EFEITO_CUSTOS_DESC": -6366389.48,
+      "EFEITO_CONTRATACAO_RRH_RECEBIMENTO": 0,
+      "EFEITO_CONTRATACAO_RRH_PAGAMENTO": -257321730.63,
+      "RESULTADO_FINAL_RECEBIMENTO": 28495902.89,
+      "RESULTADO_FINAL_PAGAMENTO": -1669042219.31
+    }
+  },
+  "sumario_distribuicao_mensal_show": {
+    "success": true,
+    "name": "sumario_distrib_mensal_2025",
+    "format": "CSV",
+    "csv_url": "https://pda-download.ccee.org.br/MRWm1IXJQzq6ETYJxIeonQ/content",
+    "formats_available": [
+      "CSV",
+      "API/JSON"
+    ],
+    "datastore_active": true,
+    "full_resource": {
+      "cache_last_updated": null,
+      "cache_url": null,
+      "created": "2025-03-05T23:49:18.949314",
+      "datastore_active": true,
+      "description": "**Objetivo**: Detalhar os pagamentos, recebimentos, exposições, alívios, efeitos de contratação e ajustes, tanto de recontbailizações quanto de MCSD, apurados no MCP para os agentes da classe de distribuição no mês de referência.    **Campos contidos nesse conjunto de dados:**    * **MES_REFERENCIA** : Representa o mês e o ano de referência na qual os dados foram utilizados.  * **RESULTADO_MCP_RECEBIMENTO** : Corresponde ao Total Mensal do Resultado no Mercado de Curto Prazo do perfil de agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (TM_MCPa,m) [R$]  * **RESULTADO_MCP_PAGAMENTO** : Corresponde ao Total Mensal do Resultado no Mercado de Curto Prazo do perfil de agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (TM_MCPa,m) [R$]  * **ENCARGOS_RECEBIMENTO_DIST** : Corresponde ao Total de Encargos Consolidado, do perfil de agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (ENCARGOSa,m) [R$]  * **ENCARGOS_PAGAMENTO_DIST** : Corresponde ao Total de Encargos Consolidado, do perfil de agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (ENCARGOSa,m) [R$]  * **EXPOSICAO_FINANCEIRA_RECEBIMENTO** : Corresponde a Exposição Financeira Positiva de CCEAR, CCGF e CCEN do perfil de agente “a” no Mês de Apuração “m” (EF_CCEAR_Pa,m) [R$]  * **EXPOSICAO_FINANCEIRA_PAGAMENTO** : Corresponde ao somatório entre a Exposição Financeira Negativa de CCEAR, CCGF e CCEN do perfil de agente “a” no Mês de Apuração “m” e a Total de Penalidade para Atendimento às Exposições Negativas de CCEAR, CCGF e CCEN no mês de apuração “m” (EF_CCEAR_Na,m + TPA_EF_CCEARa,m) [R$]  * **ALIVIO_RETROATIVO_RECEBIMENTO** : Corresponde ao Total de Ajustes referente ao Alívio Retroativo do perfil de agente “a”, no mês de apuração “m” para fins de recebimento das dsitribuidoras (TAJ_Ara,m) [R$]  * **ALIVIO_RETROATIVO_PAGAMENTO** : Corresponde ao Total de Ajustes referente ao Alívio Retroativo do perfil de agente “a”, no mês de apuração “m” para fins de pagamento das dsitribuidoras (TAJ_Ara,m) [R$]  * **EFEITO_CONTRATACAO_DISP_RECEBIMENTO** : Corresponde ao Efeito da Contratação por Disponibilidade, para cada perfil de agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (ECDa,m) [R$]  * **EFEITO_CONTRATACAO_DISP_PAGAMENTO** : Corresponde ao Efeito da Contratação por Disponibilidade, para cada perfil de agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (ECDa,m) [R$]  * **EFEITO_CONTRATACAO_CCGF_RECEBIMENTO** : Corresponde ao Efeito do CCGF, para cada perfil de agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (ECCGFa,m) [R$]  * **EFEITO_CONTRATACAO_CCGF_PAGAMENTO** : Corresponde ao Efeito do CCGF, para cada perfil de agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (ECCGFa,m) [R$]  * **EFEITO_CONTRATACAO_CCEN_RECEBIMENTO** : Corresponde ao Efeito do CCEN, para cada perfil de agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (ECCENa,m) [R$]  * **EFEITO_CONTRATACAO_CCEN_PAGAMENTO** : Corresponde ao Efeito do CCEN, para cada perfil de agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (ECCENa,m) [R$]  * **AJUSTE_RECONTAB_RECEBIMENTO** : Corresponde ao Ajuste Decorrente de Recontabilizações do perfil de agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (AJU_RECONa,m) [R$]  * **AJUSTE_RECONTAB_PAGAMENTO** : Corresponde ao Ajuste Decorrente de Recontabilizações do perfil de agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (AJU_RECONa,m) [R$]  * **AJUSTE_MCSD_XP_RECEBIMENTO** : Corresponde ao Ajuste Decorrente do MCSD Ex-Post do perfil do agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (MCSD_Xpa,m) [R$]  * **AJUSTE_MCSD_XP_PAGAMENTO** : Corresponde ao Ajuste Decorrente do MCSD Ex-Post do perfil do agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (MCSD_Xpa,m) [R$]  * **RESULTADO_EXCEDENTE_ER_RECEBIMENTO** : Corresponde ao Resultado Referente ao Excedente Financeiro da Energia de Reserva por cada perfil de agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (RES_EXCD_Era,m) [R$]  * **EFEITO_CONTRATACAO_QTD_PAGAMENTO** : Corresponde ao Efeito da Contratação por Quantidade, para cada perfil de agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (ECQAa,m) [R$]  * **EFEITO_CONTRATACAO_ITAIPU_RECEBIMENTO** : Corresponde ao Efeito da Contratação de Itaipu, para cada perfil de agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (EC_ITa,m) [R$]  * **EFEITO_CONTRATACAO_ITAIPU_PAGAMENTO** : Corresponde ao Efeito da Contratação de Itaipu, para cada perfil de agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (EC_ITa,m) [R$]   * **EFEITO_CUSTOS_DESC** : Corresponde ao Efeito total dos custos devido ao descolamento entre PLD e CMO, para cada perfil de agente “a”, no mês de apuração “m” (E_DESCa,m) [R$]  * **EFEITO_CONTRATACAO_RRH_RECEBIMENTO** : Corresponde ao Efeito do Repasse do Risco Hidrológico, para cada perfil de agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (ERRHa,m) [R$]  * **EFEITO_CONTRATACAO_RRH_PAGAMENTO** : Corresponde ao Efeito do Repasse do Risco Hidrológico, para cada perfil de agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (ERRHa,m) [R$]  * **RESULTADO_FINAL_RECEBIMENTO** : Corresponde ao Resultado Final do perfil de agente “a”, no mês de apuração “m” para fins de recebimento das distribuidoras (RESULTADOa,m) [R$]  * **RESULTADO_FINAL_PAGAMENTO** : Corresponde ao Resultado Final do perfil de agente “a”, no mês de apuração “m” para fins de pagamento das distribuidoras (RESULTADOa,m) [R$]",
+      "format": "CSV",
+      "hash": "",
+      "id": "9e8e3f5f-58a8-4744-b6da-7309a4513fcb",
+      "last_modified": "2026-02-02T17:37:52.037000",
+      "metadata_modified": "2026-02-02T20:37:52.205690",
+      "mimetype": null,
+      "mimetype_inner": null,
+      "name": "sumario_distrib_mensal_2025",
+      "package_id": "d87247d0-4c34-4761-be4d-43acb5f04acc",
+      "position": 2,
+      "resource_type": null,
+      "size": null,
+      "state": "active",
+      "url": "https://pda-download.ccee.org.br/MRWm1IXJQzq6ETYJxIeonQ/content",
+      "url_type": null
+    }
+  },
+  "sumario_distribuicao_mensal_csv": {
+    "success": false,
+    "error": "Content-Type não é CSV: application/json;charset=UTF-8",
+    "content_type": "application/json;charset=UTF-8",
+    "first_bytes": "b\"\\x1f\\x8b\\x08\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x85\\x96\\xc1r\\x1b9\\x0cD\\xef\\xf9\\x97a\\x11 \\x08\\x925'E\\x96\\xb3\\xdaJ,\\xaf\\xac\\xa4r\\xf3\\xff\\xff\\xc5>p\\xe4\\xd8N\\xecx\\x9dl\\xc5C\\x12\\x04\\x1a\\xdd\\r~;<<\\x9e\\x0f\\xb7\\x87\\xf3\\xe1n\\x7f\\xdc\\xad\\xe7\\xc3\\xc3\\xf7\\xaf\\x97\\xdd\\xcd\\xe9\\xf1\\xdb\\xfe\\x9e\\x85\\xfd\\xe1\\xf3\\xf1\\xdb\\xe1\\xeer\\xfam\\xe5~\\xf7e\""
+  }
+}

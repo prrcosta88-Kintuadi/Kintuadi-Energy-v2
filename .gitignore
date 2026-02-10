@@ -1,50 +1,113 @@
-# Dados
-data/
-*.csv
-*.json
-*.pkl
+# ============================================
+# KINTUADI ENERGY - GITIGNORE
+# ============================================
 
-# Credenciais
-.env
-*.key
-*.pem
-secrets/
+# 📁 DADOS E OUTPUTS
+data/                 # Dados coletados (CSVs, JSONs)
+logs/                 # Logs do sistema
+audit_logs/           # Logs de auditoria
+backups/              # Backups automáticos
+temp/                 # Arquivos temporários
+cache/                # Cache do sistema
+*.csv                 # Arquivos CSV (gerados)
+*.json                # Arquivos JSON (gerados)
+*.pkl                 # Pickles (serialização)
+*.parquet             # Arquivos Parquet
+*.feather             # Arquivos Feather
+*.h5                  # Arquivos HDF5
+*.db                  # Bancos SQLite
+*.sqlite              # Bancos SQLite
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# 🔐 CREDENCIAIS E SEGREDOS
+.env                  # Variáveis de ambiente
+.env.local            # Ambiente local
+.env.production       # Ambiente produção
+.env.development      # Ambiente desenvolvimento
+*.env                 # Qualquer arquivo .env
+secrets/              # Pasta de segredos
+*.key                 # Chaves privadas
+*.pem                 # Certificados
+*.cert                # Certificados
+*.crt                 # Certificados
+config_secret.yaml    # Configurações secretas
+credentials.json      # Credenciais API
+api_keys.txt          # Chaves de API
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
+# 🐍 PYTHON
+__pycache__/          # Cache Python
+*.py[cod]             # Bytecode Python
+*$py.class            # Bytecode Jython
+*.so                  # Extensões C
+.Python/              # Ambiente Python
+build/                # Builds
+develop-eggs/         # Eggs de desenvolvimento
+dist/                 # Distribuições
+downloads/            # Downloads
+eggs/                 # Eggs Python
+.eggs/                # Eggs Python
+lib/                  # Bibliotecas
+lib64/                # Bibliotecas 64-bit
+parts/                # Partes
+sdist/                # Distribuições fonte
+var/                  # Variáveis
+wheels/               # Wheels
+*.egg-info/           # Informações de eggs
+.installed.cfg        # Configurações instaladas
+*.egg                 # Eggs Python
+MANIFEST              # Manifest
+pip-log.txt           # Logs do pip
+pip-delete-this-directory.txt
 
-# Streamlit
-.streamlit/
+# 📊 NOTEBOOKS E ANÁLISES
+*.ipynb               # Jupyter notebooks
+.ipynb_checkpoints/   # Checkpoints Jupyter
+notebooks/            # Pasta de notebooks (opcional)
 
-# Logs
-*.log
-logs/
+# 🎨 IDEs E EDITORES
+.vscode/              # VS Code
+.idea/                # PyCharm/IntelliJ
+*.swp                 # Vim swap files
+*.swo                 # Vim swap files
+*.sublime-*           # Sublime Text
+.project              # Eclipse
+.pydevproject         # Eclipse
+.settings/            # Eclipse
+*.code-workspace      # VS Code workspace
 
-# Sistema
-.DS_Store
-Thumbs.db
+# 🌐 STREAMLIT
+.streamlit/           # Configurações do Streamlit
+.streamlit/secrets.toml  # Segredos do Streamlit
+
+# 📝 DOCUMENTAÇÃO
+docs/_build/          # Build da documentação
+docs/source/generated/ # Documentação gerada
+
+# 🐳 DOCKER
+Dockerfile.local      # Dockerfile local
+docker-compose.override.yml  # Override do compose
+.dockerignore         # Docker ignore
+
+# 🧪 TESTES
+.coverage             # Coverage reports
+htmlcov/              # HTML coverage
+.pytest_cache/        # Cache pytest
+.tox/                 # Tox
+.mypy_cache/          # Cache mypy
+
+# 🗂️ SISTEMA OPERACIONAL
+.DS_Store             # macOS
+Thumbs.db             # Windows
+desktop.ini           # Windows
+*.lnk                 # Windows shortcuts
+
+# 📦 PROJETO ESPECÍFICO
+# Mantenha estes se existirem:
+# kintuadi_latest.json  # Se quiser versionar o último
+# core_analysis_latest.json  # Se quiser versionar
+
+# 🚫 EXCEÇÕES (não ignorar)
+!.gitkeep             # Mantém pastas vazias no git
+!.env.example         # Template de .env (versionar!)
+!requirements.txt     # Dependências (versionar!)
+!README.md            # Documentação (versionar!)
+!LICENSE              # Licença (versionar!)
