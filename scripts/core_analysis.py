@@ -990,3 +990,4 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     
     with open(path, "w", encoding="utf-8") as f:
         json.dump(core, f, indent=2, ensure_ascii=False, default=str)
+    return core

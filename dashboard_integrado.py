@@ -442,74 +442,128 @@ def load_core_analysis():
         return None
 
 def run_data_collector():
-    """Executa o coletor de dados em um subprocesso."""
+    """Executa o coletor de dados importando diretamente a função."""
     try:
-        # Verificar qual script de coleta está disponível
-        collector_scripts = [
-            "ons_collector_v2.py",
-            "ccee_collector_v2.py", 
-            "integrated_collector_v2.py"
-        ]
+        print("🔄 Iniciando coleta de dados...")
         
-        script_to_run = None
-        for script in collector_scripts:
-            if os.path.exists(script):
-                script_to_run = script
-                break
+        # Tentar importar do run_collector.py
+        try:
+            from run_collector import run_collector_v2
+            print("✅ Módulo run_collector importado com sucesso")
+        except ImportError as e:
+            print(f"❌ Erro ao importar run_collector: {e}")
+            print("Tentando importar diretamente do integrated_collector_v2...")
+            
+            # Fallback: importar diretamente
+            try:
+                from scripts.integrated_collector_v2 import KintuadiIntegratedCollectorV2
+                
+                # Executar coleta
+                collector = KintuadiIntegratedCollectorV2()
+                success = collector.quick_collect()
+                
+                if success:
+                    print("✅ Coleta executada com sucesso (método direto)")
+                    return True
+                else:
+                    print("❌ Coleta falhou (método direto)")
+                    return False
+                    
+            except ImportError as e2:
+                print(f"❌ Erro ao importar integrated_collector_v2: {e2}")
+                st.error(f"Erro de importação: {e2}")
+                return False
         
-        if not script_to_run:
-            st.error("Nenhum script de coleta encontrado.")
-            return False
+        # Executar usando a função importada
+        print("🚀 Executando run_collector_v2()...")
+        success = run_collector_v2()
         
-        # Executar o coletor
-        result = subprocess.run(
-            [sys.executable, script_to_run],
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minutos timeout
-        )
-        
-        if result.returncode == 0:
-            print(f"DEBUG: Coletor executado com sucesso: {script_to_run}")
-            print(f"DEBUG: Saída: {result.stdout[:500]}...")
+        if success:
+            print("✅ Coleta concluída com sucesso!")
             return True
         else:
-            print(f"DEBUG: Erro no coletor: {result.stderr}")
+            print("❌ Coleta falhou")
             return False
             
-    except subprocess.TimeoutExpired:
-        print("DEBUG: Coletor expirou (timeout)")
-        return False
     except Exception as e:
-        print(f"DEBUG: Erro ao executar coletor: {e}")
+        print(f"❌ Erro durante a execução do coletor: {e}")
+        import traceback
+        traceback.print_exc()
+        st.error(f"Erro na coleta: {str(e)[:100]}...")
         return False
 
 def update_analysis():
     """Atualiza a análise executando o coletor e gerando nova análise."""
+    import time
+    
     with st.spinner("🔄 Atualizando dados do sistema..."):
-        # Executar coletor
-        success = run_data_collector()
-        
-        if success:
+        try:
+            # Tentar importar e executar o coletor
+            try:
+                from run_collector import run_collector_v2
+                print("✅ Importado run_collector_v2")
+                success = run_collector_v2()
+            except ImportError as e:
+                print(f"❌ Erro ao importar run_collector_v2: {e}")
+                st.error(f"Erro ao importar coletor: {e}")
+                return None
+            except Exception as e:
+                print(f"❌ Erro ao executar run_collector_v2: {e}")
+                st.error(f"Erro na execução do coletor: {e}")
+                return None
+            
+            if not success:
+                st.error("❌ Coleta de dados falhou.")
+                return None
+            
+            # Pequena pausa para garantir que os arquivos foram salvos
+            time.sleep(2)
+            
             # Carregar dados brutos atualizados
             raw = load_latest_raw()
             
-            if raw:
-                # Gerar nova análise
-                with st.spinner("📊 Gerando nova análise..."):
+            if not raw:
+                st.error("❌ Não foi possível carregar dados após a coleta.")
+                # Listar arquivos em data/ para debug
+                if os.path.exists("data"):
+                    files = os.listdir("data")
+                    st.info(f"Arquivos em data/: {', '.join(files[:5])}{'...' if len(files) > 5 else ''}")
+                return None
+            
+            # Gerar nova análise
+            with st.spinner("📊 Gerando nova análise..."):
+                try:
                     new_core = build_core_analysis(raw)
                     
                     if new_core:
-                        st.success("✅ Análise atualizada com sucesso!")
+                        # Verificar se a análise tem estrutura básica
+                        required = ["timestamp", "hydrology", "prices"]
+                        missing = [key for key in required if key not in new_core]
+                        
+                        if missing:
+                            st.warning(f"⚠️ Análise gerada, mas faltam: {missing}")
+                        
+                        # Forçar salvamento do arquivo
+                        os.makedirs("data", exist_ok=True)
+                        with open("data/core_analysis_latest.json", "w", encoding="utf-8") as f:
+                            json.dump(new_core, f, indent=2, ensure_ascii=False, default=str)
+                        
+                        st.success(f"✅ Análise atualizada! Timestamp: {new_core.get('timestamp', 'N/A')}")
                         return new_core
                     else:
-                        st.error("❌ Erro ao gerar nova análise.")
+                        st.error("❌ build_core_analysis retornou None")
                         return None
-            else:
-                st.error("❌ Não foi possível carregar dados após a coleta.")
-                return None
-        else:
-            st.error("❌ Falha na coleta de dados.")
+                        
+                except Exception as e:
+                    st.error(f"❌ Erro em build_core_analysis: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return None
+                    
+        except Exception as e:
+            st.error(f"❌ Erro inesperado em update_analysis: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
 def badge_status_sistema(classificacao: str, risco_sistêmico: str) -> str:
