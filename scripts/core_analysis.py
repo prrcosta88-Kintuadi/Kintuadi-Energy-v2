@@ -280,25 +280,15 @@ def compute_mcp_economico(
     }
 
 
-# =====================================================================
-# ANÁLISE TÉRMICA REVISADA (V5) - COM DUPLA PERSPECTIVA
-# =====================================================================
-
-def calcular_razao_cvu_pld(pld_medio: Optional[float], cvu_medio: Optional[float]) -> Optional[float]:
-    """
-    Calcula a razão CVU/PLD (indicador fundamental).
+    contratos = {
+        "agregados_por_duracao": open_data.get("sumario_distribuicao_mensal"),
+        "status": "parcial" if open_data.get("sumario_distribuicao_mensal") else "indisponível",
+    }
     
-    Retorna:
-    - < 0.8: CVU significativamente menor que PLD
-    - 0.8-0.95: CVU próximo do PLD
-    - 0.95-1.0: CVU muito próximo do PLD
-    - 1.0-1.5: CVU maior que PLD
-    - > 1.5: CVU muito maior que PLD (folga estrutural)
-    """
-    if pld_medio is None or cvu_medio is None or pld_medio <= 0:
-        return None
-    
-    return cvu_medio / pld_medio
+    mcp = {
+        "sumario_mensal": _safe_get(ccee, "mcp_summary"),
+        "status": "parcial" if _safe_get(ccee, "mcp_summary") else "indisponível",
+    }
 
 
 def calcular_margem_seguranca_sistema(pld_medio: Optional[float], cvu_medio: Optional[float]) -> Optional[float]:
