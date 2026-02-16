@@ -186,6 +186,29 @@ class ONSCollectorV2:
                 f"CVU_USINA_TERMICA_{year}.csv"
             ))
 
+        # ============================
+        # CURVA DE CARGA (2018 → atual) - XLSX
+        # ============================
+        curva_carga_years = self._generate_year_range(2018)
+        for year in curva_carga_years:
+            dynamic.append((
+                f"Curva_Carga_{year}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/curva-carga-ho/"
+                f"CURVA_CARGA_{year}.xlsx"
+            ))
+
+        # ============================
+        # GERAÇÃO POR USINA HORÁRIA (2018-2021)
+        # ============================
+        for year in range(2018, 2022):
+            dynamic.append((
+                f"Geracao_Usina_Horaria_{year}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/geracao_usina_2_ho/"
+                f"GERACAO_USINA-2_{year}.csv"
+            ))
+
         return dynamic
 
     
@@ -230,6 +253,17 @@ class ONSCollectorV2:
                 f"RESTRICAO_COFF_EOLICA_DETAIL_{year}_{month}.csv"
             ))
 
+        # Geração por usina (mensal: 2022-01 → atual)
+        months_geracao_usina = self._generate_month_range("2022-01")
+        for m in months_geracao_usina:
+            year, month = m.split("-")
+            dynamic.append((
+                f"Geracao_Usina_Horaria_{m}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/geracao_usina_2_ho/"
+                f"GERACAO_USINA-2_{year}_{month}.csv"
+            ))
+
         return dynamic
 
 
@@ -251,9 +285,9 @@ class ONSCollectorV2:
         path = os.path.join("data", "ons", year)
         os.makedirs(path, exist_ok=True)
 
-        file_path = os.path.join(path, f"{dataset_name}.csv")
-
-        return not os.path.exists(file_path)
+        csv_path = os.path.join(path, f"{dataset_name}.csv")
+        xlsx_path = os.path.join(path, f"{dataset_name}.xlsx")
+        return not (os.path.exists(csv_path) or os.path.exists(xlsx_path))
 
     
     def collect_open_data(self) -> Dict[str, Any]:
@@ -338,7 +372,8 @@ class ONSCollectorV2:
         path = os.path.join("data", "ons", year)
         os.makedirs(path, exist_ok=True)
 
-        file_path = os.path.join(path, f"{dataset_name}.csv")
+        ext = ".xlsx" if url.lower().endswith(".xlsx") else ".csv"
+        file_path = os.path.join(path, f"{dataset_name}{ext}")
 
         # -----------------------------
         # Se já existe localmente
@@ -373,7 +408,7 @@ class ONSCollectorV2:
         with open(file_path, "wb") as f:
             f.write(response.content)
 
-        rows = self._count_csv_rows(response.content)
+        rows = self._count_csv_rows(response.content) if ext == ".csv" else 0
 
         return file_path, rows
 
