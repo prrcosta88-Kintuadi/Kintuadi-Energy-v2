@@ -430,24 +430,7 @@ def load_core_analysis():
 
     if not os.path.exists(core_file):
         logger.info("Core não encontrado.")
-
-        # Tentativa única por sessão: gerar core a partir do raw já coletado
-        attempted = st.session_state.get("core_autobuild_attempted", False)
-        if not attempted:
-            st.session_state["core_autobuild_attempted"] = True
-            logger.info("Tentando gerar core automaticamente a partir do raw existente...")
-            try:
-                raw = load_latest_raw()
-                if raw:
-                    build_core_analysis(raw, output_dir="data")
-                    logger.info("Geração automática de core concluída.")
-                else:
-                    logger.warning("Raw indisponível para geração automática do core.")
-            except Exception as e:
-                logger.error(f"Falha na geração automática do core: {e}")
-
-        if not os.path.exists(core_file):
-            return None
+        return None
 
     try:
         with open(core_file, "r", encoding="utf-8") as f:
