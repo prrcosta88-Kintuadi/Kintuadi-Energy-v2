@@ -1621,10 +1621,24 @@ def classify_sin_cycle(
 def _core_log(stage: str, message: str, **context: Any) -> None:
     ts = datetime.now().isoformat()
     ctx = " | ".join(f"{k}={v}" for k, v in context.items())
+    line = f"[{ts}] [build_core_analysis] [{stage}] {message}"
     if ctx:
-        print(f"[{ts}] [build_core_analysis] [{stage}] {message} | {ctx}")
-    else:
-        print(f"[{ts}] [build_core_analysis] [{stage}] {message}")
+        line = f"{line} | {ctx}"
+
+    # stdout imediato (útil no terminal/powershell)
+    print(line, flush=True)
+
+    # persistência em arquivo para diagnóstico quando stdout não aparece
+    try:
+        log_path = os.environ.get("KINTUADI_CORE_LOG_PATH", os.path.join("data", "core_analysis_debug.log"))
+        log_dir = os.path.dirname(log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write(line + "\n")
+    except Exception:
+        # logging não pode quebrar o pipeline principal
+        pass
 
 
 def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> Dict[str, Any]:
@@ -1968,27 +1982,49 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     # ---------------- Persist ----------------
     _core_log("PERSIST", "Iniciando persistência do core")
 
+    # 1) Garantir diretório
     os.makedirs(output_dir, exist_ok=True)
 
-    removidos = []
-    # REMOVER versões antigas primeiro
-    for filename in os.listdir(output_dir):
-        if filename.startswith("core_analysis_") and filename.endswith(".json"):
-            target = os.path.join(output_dir, filename)
-            os.remove(target)
-            removidos.append(filename)
-
-    _core_log("PERSIST", "Arquivos anteriores removidos", removidos=len(removidos))
-
-    # Salvar apenas o arquivo mais recente
-    path = os.path.join(output_dir, "core_analysis_latest.json")
+    # 2) Salvar em arquivo temporário primeiro
+    temp_path = os.path.join(output_dir, "core_analysis_temp.json")
+    final_path = os.path.join(output_dir, "core_analysis_latest.json")
 
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(core, f, indent=2, ensure_ascii=False, default=str)
+
+        _core_log("PERSIST", "Arquivo temporário salvo com sucesso", temp_path=temp_path)
+
+        # 3) Limpar versões antigas (exceto temp recém-gerado)
+        removidos = []
+        for filename in os.listdir(output_dir):
+            if (
+                filename.startswith("core_analysis_")
+                and filename.endswith(".json")
+                and filename != "core_analysis_temp.json"
+            ):
+                target = os.path.join(output_dir, filename)
+                os.remove(target)
+                removidos.append(filename)
+
+        _core_log("PERSIST", "Arquivos anteriores removidos", removidos=len(removidos))
+
+        # 4) Promover temp para definitivo de forma atômica quando possível
+        os.replace(temp_path, final_path)
+
     except Exception as e:
-        _core_log("PERSIST", "Falha ao salvar core_analysis_latest.json", path=path, erro=str(e))
+        _core_log("PERSIST", "Falha ao salvar core_analysis_latest.json", final_path=final_path, erro=str(e))
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
         raise
 
-    _core_log("PERSIST", "core_analysis_latest.json salvo com sucesso", path=path, tamanho_bytes=os.path.getsize(path))
+    _core_log(
+        "PERSIST",
+        "core_analysis_latest.json salvo com sucesso",
+        path=final_path,
+        tamanho_bytes=os.path.getsize(final_path),
+    )
     return core
