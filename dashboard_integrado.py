@@ -425,22 +425,47 @@ def load_latest_raw():
         return None
 
 def load_core_analysis():
-
-    core_file = "data/core_analysis_latest.json"
-
-    if not os.path.exists(core_file):
-        logger.info("Core não encontrado.")
+    """Sempre executa build_core_analysis a partir do raw mais recente e retorna o core."""
+    raw = load_latest_raw()
+    if not raw:
+        logger.error("Dados brutos indisponíveis para executar build_core_analysis.")
         return None
 
     try:
-        with open(core_file, "r", encoding="utf-8") as f:
-            core = json.load(f)
+        logger.info("Executando build_core_analysis (modo obrigatório no carregamento do dashboard)...")
+        core = build_core_analysis(raw, output_dir="data")
 
-        return core
+        if isinstance(core, dict):
+            return core
+
+        logger.error("build_core_analysis retornou estrutura inválida.")
+        return None
 
     except Exception as e:
-        logger.error(f"Erro ao carregar core: {e}")
+        logger.error(f"Falha ao executar build_core_analysis: {e}")
         return None
+
+
+def diagnose_pipeline_status() -> Dict[str, str]:
+    """Diagnóstico simples por etapa (coleta → integração → análise)."""
+    status = {
+        "coleta": "erro",
+        "integracao": "erro",
+        "analise": "erro",
+    }
+
+    has_raw_latest = os.path.exists("data/kintuadi_latest.json")
+    has_any_raw = bool(glob.glob("data/kintuadi_*.json"))
+    has_core = os.path.exists("data/core_analysis_latest.json")
+
+    if has_raw_latest or has_any_raw:
+        status["coleta"] = "ok"
+        status["integracao"] = "ok"
+
+    if has_core:
+        status["analise"] = "ok"
+
+    return status
 
 
 def diagnose_pipeline_status() -> Dict[str, str]:
@@ -515,80 +540,6 @@ def run_data_collector():
         traceback.print_exc()
         st.error(f"Erro na coleta: {str(e)[:100]}...")
         return False
-
-def update_analysis():
-    """Atualiza a análise executando o coletor e gerando nova análise."""
-    import time
-    
-    with st.spinner("🔄 Atualizando dados do sistema..."):
-        try:
-            # Tentar importar e executar o coletor
-            try:
-                from run_collector import run_collector_v2
-                print("✅ Importado run_collector_v2")
-                success = run_collector_v2()
-            except ImportError as e:
-                print(f"❌ Erro ao importar run_collector_v2: {e}")
-                st.error(f"Erro ao importar coletor: {e}")
-                return None
-            except Exception as e:
-                print(f"❌ Erro ao executar run_collector_v2: {e}")
-                st.error(f"Erro na execução do coletor: {e}")
-                return None
-            
-            if not success:
-                st.error("❌ Coleta de dados falhou.")
-                return None
-            
-            # Pequena pausa para garantir que os arquivos foram salvos
-            time.sleep(2)
-            
-            # Carregar dados brutos atualizados
-            raw = load_latest_raw()
-            
-            if not raw:
-                st.error("❌ Não foi possível carregar dados após a coleta.")
-                # Listar arquivos em data/ para debug
-                if os.path.exists("data"):
-                    files = os.listdir("data")
-                    st.info(f"Arquivos em data/: {', '.join(files[:5])}{'...' if len(files) > 5 else ''}")
-                return None
-            
-            # Gerar nova análise
-            with st.spinner("📊 Gerando nova análise..."):
-                try:
-                    new_core = build_core_analysis(raw)
-                    
-                    if new_core:
-                        # Verificar se a análise tem estrutura básica
-                        required = ["timestamp", "hydrology", "prices"]
-                        missing = [key for key in required if key not in new_core]
-                        
-                        if missing:
-                            st.warning(f"⚠️ Análise gerada, mas faltam: {missing}")
-                        
-                        # Forçar salvamento do arquivo
-                        os.makedirs("data", exist_ok=True)
-                        with open("data/core_analysis_latest.json", "w", encoding="utf-8") as f:
-                            json.dump(new_core, f, indent=2, ensure_ascii=False, default=str)
-                        
-                        st.success(f"✅ Análise atualizada! Timestamp: {new_core.get('timestamp', 'N/A')}")
-                        return new_core
-                    else:
-                        st.error("❌ build_core_analysis retornou None")
-                        return None
-                        
-                except Exception as e:
-                    st.error(f"❌ Erro em build_core_analysis: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return None
-                    
-        except Exception as e:
-            st.error(f"❌ Erro inesperado em update_analysis: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
 def badge_status_sistema(classificacao: str, risco_sistêmico: str) -> str:
     """
