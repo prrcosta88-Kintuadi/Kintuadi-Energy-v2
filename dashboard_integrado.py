@@ -468,6 +468,28 @@ def diagnose_pipeline_status() -> Dict[str, str]:
     return status
 
 
+def diagnose_pipeline_status() -> Dict[str, str]:
+    """Diagnóstico simples por etapa (coleta → integração → análise)."""
+    status = {
+        "coleta": "erro",
+        "integracao": "erro",
+        "analise": "erro",
+    }
+
+    has_raw_latest = os.path.exists("data/kintuadi_latest.json")
+    has_any_raw = bool(glob.glob("data/kintuadi_*.json"))
+    has_core = os.path.exists("data/core_analysis_latest.json")
+
+    if has_raw_latest or has_any_raw:
+        status["coleta"] = "ok"
+        status["integracao"] = "ok"
+
+    if has_core:
+        status["analise"] = "ok"
+
+    return status
+
+
 def run_data_collector():
     """Executa o coletor de dados importando diretamente a função."""
     try:
