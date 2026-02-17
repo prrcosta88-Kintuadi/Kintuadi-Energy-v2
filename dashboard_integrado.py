@@ -425,32 +425,52 @@ def load_latest_raw():
         return None
 
 def load_core_analysis():
+    """Executa build_core_analysis no primeiro carregamento da sessão e reutiliza o resultado."""
+    cached_core = st.session_state.get("core_runtime")
+    if isinstance(cached_core, dict):
+        return cached_core
 
-    core_file = "data/core_analysis_latest.json"
-
-    if not os.path.exists(core_file):
-        logger.info("Core não encontrado. Gerando automaticamente...")
-
-        raw = load_latest_raw()
-        if not raw:
-            logger.error("Raw não disponível.")
-            return None
-
-        core = build_core_analysis(raw)
-
-        if not core:
-            logger.error("Falha ao gerar core.")
-            return None
-
-        return core
+    raw = load_latest_raw()
+    if not raw:
+        logger.error("Dados brutos indisponíveis para executar build_core_analysis.")
+        return None
 
     try:
-        with open(core_file, "r", encoding="utf-8") as f:
-            return json.load(f)
+        logger.info("Executando build_core_analysis (bootstrap da sessão do dashboard)...")
+        core = build_core_analysis(raw, output_dir="data")
+
+        if isinstance(core, dict):
+            st.session_state["core_runtime"] = core
+            return core
+
+        logger.error("build_core_analysis retornou estrutura inválida.")
+        return None
 
     except Exception as e:
-        logger.error(f"Erro ao carregar core: {e}")
+        logger.error(f"Falha ao executar build_core_analysis: {e}")
         return None
+
+
+def diagnose_pipeline_status() -> Dict[str, str]:
+    """Diagnóstico simples por etapa (coleta → integração → análise)."""
+    status = {
+        "coleta": "erro",
+        "integracao": "erro",
+        "analise": "erro",
+    }
+
+    has_raw_latest = os.path.exists("data/kintuadi_latest.json")
+    has_any_raw = bool(glob.glob("data/kintuadi_*.json"))
+    has_core = os.path.exists("data/core_analysis_latest.json")
+
+    if has_raw_latest or has_any_raw:
+        status["coleta"] = "ok"
+        status["integracao"] = "ok"
+
+    if has_core:
+        status["analise"] = "ok"
+
+    return status
 
 
 def run_data_collector():
@@ -503,80 +523,6 @@ def run_data_collector():
         traceback.print_exc()
         st.error(f"Erro na coleta: {str(e)[:100]}...")
         return False
-
-def update_analysis():
-    """Atualiza a análise executando o coletor e gerando nova análise."""
-    import time
-    
-    with st.spinner("🔄 Atualizando dados do sistema..."):
-        try:
-            # Tentar importar e executar o coletor
-            try:
-                from run_collector import run_collector_v2
-                print("✅ Importado run_collector_v2")
-                success = run_collector_v2()
-            except ImportError as e:
-                print(f"❌ Erro ao importar run_collector_v2: {e}")
-                st.error(f"Erro ao importar coletor: {e}")
-                return None
-            except Exception as e:
-                print(f"❌ Erro ao executar run_collector_v2: {e}")
-                st.error(f"Erro na execução do coletor: {e}")
-                return None
-            
-            if not success:
-                st.error("❌ Coleta de dados falhou.")
-                return None
-            
-            # Pequena pausa para garantir que os arquivos foram salvos
-            time.sleep(2)
-            
-            # Carregar dados brutos atualizados
-            raw = load_latest_raw()
-            
-            if not raw:
-                st.error("❌ Não foi possível carregar dados após a coleta.")
-                # Listar arquivos em data/ para debug
-                if os.path.exists("data"):
-                    files = os.listdir("data")
-                    st.info(f"Arquivos em data/: {', '.join(files[:5])}{'...' if len(files) > 5 else ''}")
-                return None
-            
-            # Gerar nova análise
-            with st.spinner("📊 Gerando nova análise..."):
-                try:
-                    new_core = build_core_analysis(raw)
-                    
-                    if new_core:
-                        # Verificar se a análise tem estrutura básica
-                        required = ["timestamp", "hydrology", "prices"]
-                        missing = [key for key in required if key not in new_core]
-                        
-                        if missing:
-                            st.warning(f"⚠️ Análise gerada, mas faltam: {missing}")
-                        
-                        # Forçar salvamento do arquivo
-                        os.makedirs("data", exist_ok=True)
-                        with open("data/core_analysis_latest.json", "w", encoding="utf-8") as f:
-                            json.dump(new_core, f, indent=2, ensure_ascii=False, default=str)
-                        
-                        st.success(f"✅ Análise atualizada! Timestamp: {new_core.get('timestamp', 'N/A')}")
-                        return new_core
-                    else:
-                        st.error("❌ build_core_analysis retornou None")
-                        return None
-                        
-                except Exception as e:
-                    st.error(f"❌ Erro em build_core_analysis: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return None
-                    
-        except Exception as e:
-            st.error(f"❌ Erro inesperado em update_analysis: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
 def badge_status_sistema(classificacao: str, risco_sistêmico: str) -> str:
     """
@@ -637,9 +583,16 @@ def interpretar_razao_cvu_pld(percentual: Optional[float]) -> str:
 def analisar_formacao_preco_pld(core):
     """Analisa a formação do preço do PLD com base nas correlações."""
     mcp = core.get("mcp_economico", {})
+    adv = core.get("advanced_metrics", {})
     
-    corr_carga = mcp.get("correlacoes", {}).get("pld_vs_carga")
-    corr_hidro = mcp.get("correlacoes", {}).get("pld_vs_hidraulica")
+    # Nova abordagem: prioriza aderência físico-econômica do bloco avançado
+    corr_carga = adv.get("correlacoes", {}).get("pld_vs_carga_liquida")
+    if corr_carga is None:
+        corr_carga = mcp.get("correlacoes", {}).get("pld_vs_carga")
+
+    corr_hidro = adv.get("correlacoes", {}).get("pld_vs_ear_mensal")
+    if corr_hidro is None:
+        corr_hidro = mcp.get("correlacoes", {}).get("pld_vs_hidraulica")
     
     # Valores absolutos para análise de força
     abs_corr_carga = abs(corr_carga) if corr_carga is not None else 0
@@ -732,12 +685,6 @@ def main():
     css = load_custom_css()
     st.markdown(css, unsafe_allow_html=True)
 
-    # Inicializar session state para controle de atualização
-    if 'updating' not in st.session_state:
-        st.session_state.updating = False
-    if 'last_update' not in st.session_state:
-        st.session_state.last_update = None
-
     with st.sidebar:
         st.markdown("## ⚡ **KINTUADI**")
         st.markdown("---")
@@ -774,72 +721,25 @@ def main():
                     st.success(f"✓ Dados de: {formatted_time}")
                 except:
                     st.success(f"✓ Dados disponíveis")
-            
-            # Botão de atualização
-            if st.session_state.updating:
-                st.warning("🔄 Atualizando dados...")
-                if st.button("⏸️ Cancelar Atualização", disabled=True):
-                    st.session_state.updating = False
-            else:
-                if st.button("🔄 Atualizar Dados Agora", type="primary", use_container_width=True):
-                    raw = load_latest_raw()
-                    build_core_analysis(raw)
-                    st.session_state.updating = True
-                    st.rerun()
+
+            st.info("🔒 Dashboard em modo somente leitura.")
             
             st.markdown("---")
             
         else:
             st.error("❌ Análise não disponível")
             st.markdown("---")
-            
-            # Botão para tentar gerar análise
-            if st.button("🔧 Gerar Análise Inicial", type="primary", use_container_width=True):
-                with st.spinner("Gerando análise inicial..."):
-                    raw = load_latest_raw()
-                    if raw:
-                        new_core = build_core_analysis(raw)
-                        if new_core:
-                            st.success("✅ Análise gerada com sucesso!")
-                            st.rerun()
-                        else:
-                            st.error("❌ Falha ao gerar análise.")
-                    else:
-                        st.error("❌ Dados brutos não disponíveis.")
+
+            status = diagnose_pipeline_status()
+            st.markdown("**Diagnóstico por etapa:**")
+            st.write(f"• Coleta: {'✅' if status['coleta']=='ok' else '❌'}")
+            st.write(f"• Integração: {'✅' if status['integracao']=='ok' else '❌'}")
+            st.write(f"• Análise (core): {'✅' if status['analise']=='ok' else '❌'}")
+
+            st.caption("Execute a coleta/integrador externamente e gere o core antes de abrir o dashboard.")
         
         st.markdown("---")
         st.caption("Versão 2.0 • Dados em tempo real")
-
-    # Se está atualizando, mostrar tela de atualização
-    if st.session_state.updating:
-        st.markdown("# 🔄 Atualizando Dados do Sistema")
-        st.markdown("---")
-        
-        with st.spinner("Executando coletor de dados e gerando nova análise..."):
-            # Executar atualização
-            new_core = update_analysis()
-            
-            # Atualizar estado
-            st.session_state.updating = False
-            st.session_state.last_update = datetime.now()
-            
-            if new_core:
-                st.success("✅ Atualização concluída com sucesso!")
-                st.balloons()
-                
-                # Recarregar a página após 2 segundos
-                st.info("📋 Recarregando dashboard...")
-                st.rerun()
-            else:
-                st.error("❌ Falha na atualização.")
-                if st.button("↻ Tentar Novamente"):
-                    st.session_state.updating = True
-                    st.rerun()
-                if st.button("📊 Voltar ao Dashboard"):
-                    st.session_state.updating = False
-                    st.rerun()
-        
-        return
 
     # Se não tem core carregado, mostrar erro
     if not core:
@@ -847,13 +747,14 @@ def main():
         st.markdown("""
         Não foi possível carregar a análise do sistema. Por favor:
         
-        1. **Execute o coletor de dados** primeiro
-        2. Ou clique no botão "Gerar Análise Inicial" na sidebar
-        3. Ou verifique se o arquivo `data/core_analysis_latest.json` existe
+        1. **Execute o coletor integrado** primeiro
+        2. **Gere o core_analysis** a partir do raw coletado
+        3. Verifique se o arquivo `data/core_analysis_latest.json` existe
         
-        Para executar o coletor manualmente:
+        Fluxo recomendado:
         ```bash
-        python coletor_unificado.py
+        python run_collector.py
+        # depois gere o core (pipeline de análise)
         ```
         """)
         return
@@ -1002,16 +903,22 @@ def main():
     
     with col1:
         mcp = core.get("mcp_economico", {})
+        adv = core.get("advanced_metrics", {})
         corr = mcp.get("correlacoes", {})
         
-        corr_carga = corr.get("pld_vs_carga")
-        corr_hidro = corr.get("pld_vs_hidraulica")
+        corr_carga = adv.get("correlacoes", {}).get("pld_vs_carga_liquida")
+        if corr_carga is None:
+            corr_carga = corr.get("pld_vs_carga")
+
+        corr_hidro = adv.get("correlacoes", {}).get("pld_vs_ear_mensal")
+        if corr_hidro is None:
+            corr_hidro = corr.get("pld_vs_hidraulica")
         
-        st.metric("PLD vs Carga", f"{corr_carga:.2f}" if corr_carga is not None else "—")
+        st.metric("PLD vs Carga Líquida", f"{corr_carga:.2f}" if corr_carga is not None else "—")
         st.caption(carga_analise)
         
     with col2:
-        st.metric("PLD vs Hidrologia", f"{corr_hidro:.2f}" if corr_hidro is not None else "—")
+        st.metric("PLD vs EAR (mensal)", f"{corr_hidro:.2f}" if corr_hidro is not None else "—")
         st.caption(hidro_analise)
     
     st.markdown("---")
@@ -1029,6 +936,62 @@ def main():
         st.markdown(f"**Recomendação:** {formacao_resultados['recomendacao']}")
     
     st.markdown('</div>', unsafe_allow_html=True)
+
+    # =========================================================================
+    # NOVA CAMADA FÍSICO-ECONÔMICA (ADVANCED METRICS)
+    # =========================================================================
+    st.markdown('<div class="section-title">🧠 Aderência Físico-Econômica e Regime Estrutural</div>', unsafe_allow_html=True)
+    adv = core.get("advanced_metrics", {})
+
+    if adv:
+        ader = adv.get("aderencia_fisico_economica", {})
+        capr = adv.get("capacidade_operativa_real", {})
+        cls = adv.get("classificacoes", {})
+        idxr = adv.get("indices_renovaveis", {})
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("%GFOM", f"{ader.get('gfom_pct'):.2f}%" if ader.get("gfom_pct") is not None else "—")
+            st.caption("Σ val_verifgfom / Σ val_verifgeracao")
+        with c2:
+            st.metric("GFOM × PLD", f"{ader.get('gfom_vs_pld_corr'):.2f}" if ader.get("gfom_vs_pld_corr") is not None else "—")
+            st.caption(ader.get("gfom_vs_pld_cenario", "—"))
+        with c3:
+            st.metric("Curtailment", cls.get("curtailment_estrutural_vs_eletrico", "—"))
+            st.caption("Estrutural vs elétrico vs operacional")
+        with c4:
+            st.metric("Stress Operacional", f"{capr.get('stress_operacional_medio'):.3f}" if capr.get("stress_operacional_medio") is not None else "—")
+            st.caption("carga / capacidade disponível real")
+
+        c5, c6, c7 = st.columns(3)
+        with c5:
+            st.metric("IPR médio", f"{idxr.get('ipr_medio'):.3f}" if idxr.get("ipr_medio") is not None else "—")
+        with c6:
+            st.metric("ISR médio", f"{idxr.get('isr_medio'):.3f}" if idxr.get("isr_medio") is not None else "—")
+        with c7:
+            st.metric("Regime abundância", "Sim" if adv.get("regime_abundancia") else "Não" if adv.get("regime_abundancia") is not None else "—")
+
+        regime_anual = adv.get("mudanca_regime_historica_anual", {})
+        if regime_anual:
+            st.markdown("**Mudança de regime histórica (anual):**")
+            df_reg = pd.DataFrame(
+                [{"Ano": k, "Regime": v} for k, v in regime_anual.items()]
+            ).sort_values("Ano")
+            st.dataframe(df_reg, use_container_width=True, hide_index=True)
+
+        margem_media_m = capr.get("margem_operativa_media_mensal", {})
+        margem_p5_m = capr.get("margem_operativa_p5_mensal", {})
+        if margem_media_m or margem_p5_m:
+            rows = sorted(set(list(margem_media_m.keys()) + list(margem_p5_m.keys())))
+            df_marg = pd.DataFrame({
+                "Mes": rows,
+                "Margem média": [margem_media_m.get(r) for r in rows],
+                "Margem p5": [margem_p5_m.get(r) for r in rows],
+            })
+            st.markdown("**Margem operativa real (mensal):**")
+            st.dataframe(df_marg, use_container_width=True, hide_index=True)
+    else:
+        st.info("Métricas avançadas indisponíveis no core.")
 
     # =========================================================================
     # ANÁLISE TÉRMICA COM DUPLA PERSPECTIVA - REVISADA
@@ -1471,6 +1434,7 @@ def main():
         st.plotly_chart(fig, use_container_width=True)
 
     # PREMIUM - análise personalizada
+    premium_result = None  # placeholder: fluxo premium ainda não conectado nesta versão
     st.markdown("---")
     st.header("👤 PREMIUM — Visão Personalizada")
     if premium_result is None:
@@ -1485,6 +1449,7 @@ def main():
     mcp = core.get("mcp_economico", {})
 
     if mcp:
+        adv = core.get("advanced_metrics", {})
         c1, c2, c3 = st.columns(3)
 
         with c1:
@@ -1501,19 +1466,19 @@ def main():
 
         with c2:
             correlacoes = mcp.get("correlacoes", {})
+            corr_carga_liq = adv.get("correlacoes", {}).get("pld_vs_carga_liquida")
+            corr_show = corr_carga_liq if corr_carga_liq is not None else correlacoes.get("pld_vs_carga")
             st.metric(
-                "PLD vs Carga",
-                f"{correlacoes.get('pld_vs_carga', 0):.2f}"
-                if correlacoes.get("pld_vs_carga") is not None
-                else "—"
+                "PLD vs Carga Líquida",
+                f"{corr_show:.2f}" if corr_show is not None else "—"
             )
 
         with c3:
+            corr_ear_m = adv.get("correlacoes", {}).get("pld_vs_ear_mensal")
+            corr_hshow = corr_ear_m if corr_ear_m is not None else correlacoes.get("pld_vs_hidraulica")
             st.metric(
-                "PLD vs Hidrologia",
-                f"{correlacoes.get('pld_vs_hidraulica', 0):.2f}"
-                if correlacoes.get("pld_vs_hidraulica") is not None
-                else "—"
+                "PLD vs EAR (mensal)",
+                f"{corr_hshow:.2f}" if corr_hshow is not None else "—"
             )
     else:
         st.info("Dados de MCP indisponíveis.")
@@ -1549,9 +1514,16 @@ def main():
         st.json(core.get("metadata", {}))
 
     st.markdown("---")
+    meta = core.get("metadata", {}) if isinstance(core, dict) else {}
+    ultima_atualizacao = (
+        meta.get("generated_at")
+        or core.get("timestamp")
+        or "N/A"
+    )
+
     st.caption(f"""
     ⚡ **Kintuadi Energy Platform v2.0** | Dados em tempo real | 
-    Última atualização: {data['metadata'].get('timestamp', 'N/A')} | 
+    Última atualização: {ultima_atualizacao} | 
     Desenvolvido para gestores de energia
     """)
 
