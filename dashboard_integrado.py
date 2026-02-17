@@ -425,7 +425,11 @@ def load_latest_raw():
         return None
 
 def load_core_analysis():
-    """Sempre executa build_core_analysis a partir do raw mais recente e retorna o core."""
+    """Executa build_core_analysis no primeiro carregamento da sessão e reutiliza o resultado."""
+    cached_core = st.session_state.get("core_runtime")
+    if isinstance(cached_core, dict):
+        return cached_core
+
     raw = load_latest_raw()
     if not raw:
         logger.error("Dados brutos indisponíveis para executar build_core_analysis.")

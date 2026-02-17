@@ -11,7 +11,7 @@ VERSÃO REVISADA: Análise térmica com dupla perspectiva (sistema vs gerador)
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
 
@@ -72,6 +72,21 @@ def _find_ons_csv(ons: Dict[str, Any], dataset_prefix: str) -> Optional[str]:
 
     return candidates[0][1]
 
+
+def _find_ons_csv_all(ons: Dict[str, Any], dataset_prefix: str) -> List[str]:
+    """Retorna todos os arquivos existentes de um dataset por prefixo, ordenados por nome (desc)."""
+    candidates: List[Tuple[str, str]] = []
+    for ds in ons.get("datasets", []):
+        name = ds.get("dataset", "")
+        file = ds.get("file")
+        if isinstance(file, str):
+            file = file.replace("\\", os.sep)
+        if name.startswith(dataset_prefix) and file and os.path.exists(file):
+            candidates.append((name, file))
+
+    candidates.sort(reverse=True)
+    return [file for _, file in candidates]
+
 def _extract_ccee_records(obj: Any) -> List[Dict[str, Any]]:
     if not obj:
         return []
@@ -112,8 +127,8 @@ def _hydrology_status(ear: Optional[float]) -> Dict[str, Any]:
 
 
 def _compute_hydrology_from_csv(ons: Dict[str, Any]) -> Dict[str, Any]:
-    ear_file = _find_ons_csv(ons, "EAR_Diario_Subsistema")
-    ena_file = _find_ons_csv(ons, "ENA_Diario_Subsistema")
+    ear_files = _find_ons_csv_all(ons, "EAR_Diario_Subsistema")
+    ena_files = _find_ons_csv_all(ons, "ENA_Diario_Subsistema")
 
     ear_medio = ena_media = tendencia = None
 
@@ -599,6 +614,21 @@ def _dataset_file(ds: Dict[str, Any]) -> Optional[str]:
     return file
 
 
+def _normalize_submercado_name(value: Any) -> Optional[str]:
+    v = str(value).strip().upper() if value is not None else ""
+    mapping = {
+        "N": "NORTE",
+        "NE": "NORDESTE",
+        "SE": "SUDESTE",
+        "S": "SUL",
+        "NORTE": "NORTE",
+        "NORDESTE": "NORDESTE",
+        "SUDESTE": "SUDESTE",
+        "SUL": "SUL",
+    }
+    return mapping.get(v)
+
+
 def _load_gfom_hourly(ons: Dict[str, Any]) -> pd.DataFrame:
     frames = []
     for ds in ons.get("datasets", []):
@@ -633,6 +663,47 @@ def _load_gfom_hourly(ons: Dict[str, Any]) -> pd.DataFrame:
     return all_df.groupby("din_instante")[["ger", "gfom"]].sum().sort_index()
 
 
+def _load_gfom_hourly_by_submarket(ons: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
+    frames: List[pd.DataFrame] = []
+    for ds in ons.get("datasets", []):
+        name = ds.get("dataset", "")
+        if not name.startswith("Despacho_GFOM_"):
+            continue
+        file = _dataset_file(ds)
+        if not file or not os.path.exists(file):
+            continue
+        try:
+            df = pd.read_csv(file, sep=None, engine="python")
+            if "din_instante" not in df.columns:
+                continue
+            col_sub = "id_subsistema" if "id_subsistema" in df.columns else ("submercado" if "submercado" in df.columns else None)
+            col_ger = "val_verifgeracao" if "val_verifgeracao" in df.columns else None
+            col_gfom = "val_verifgfom" if "val_verifgfom" in df.columns else None
+            if not col_sub or not col_ger or not col_gfom:
+                continue
+
+            df["din_instante"] = pd.to_datetime(df["din_instante"], errors="coerce", dayfirst=True)
+            df[col_ger] = _normalize_br_numeric_series(df[col_ger])
+            df[col_gfom] = _normalize_br_numeric_series(df[col_gfom])
+            df["submercado"] = df[col_sub].map(_normalize_submercado_name)
+            df = df.dropna(subset=["din_instante", "submercado", col_ger, col_gfom])
+            if df.empty:
+                continue
+            frames.append(df[["din_instante", "submercado", col_ger, col_gfom]].rename(columns={col_ger: "ger", col_gfom: "gfom"}))
+        except Exception:
+            continue
+
+    if not frames:
+        return {}
+
+    all_df = pd.concat(frames, ignore_index=True)
+    result: Dict[str, pd.DataFrame] = {}
+    for sm, grp in all_df.groupby("submercado"):
+        g = grp.groupby("din_instante")[["ger", "gfom"]].sum().sort_index()
+        result[str(sm)] = g
+    return result
+
+
 def _load_disponibilidade_horaria(ons: Dict[str, Any]) -> pd.Series:
     frames = []
     for ds in ons.get("datasets", []):
@@ -662,6 +733,72 @@ def _load_disponibilidade_horaria(ons: Dict[str, Any]) -> pd.Series:
         return pd.Series(dtype=float)
     all_df = pd.concat(frames, ignore_index=True)
     return all_df.groupby("din_instante")["disp"].sum().sort_index()
+
+
+def _load_ear_ena_monthly_by_submercado(ons: Dict[str, Any]) -> Tuple[Dict[str, pd.Series], Dict[str, pd.Series]]:
+    """Consolida EAR e ENA mensais por submercado a partir de múltiplos arquivos anuais ONS."""
+    ear_by_sub: Dict[str, pd.Series] = {}
+    ena_by_sub: Dict[str, pd.Series] = {}
+
+    ear_frames: List[pd.DataFrame] = []
+    for ear_file in _find_ons_csv_all(ons, "EAR_Diario_Subsistema"):
+        try:
+            df = pd.read_csv(ear_file, sep=None, engine="python")
+            col_ts = next((c for c in ["ear_data", "din_instante", "instante"] if c in df.columns), None)
+            col_sub = next((c for c in ["id_subsistema", "nom_subsistema", "submercado"] if c in df.columns), None)
+            col_ear = "ear_verif_subsistema_percentual" if "ear_verif_subsistema_percentual" in df.columns else None
+            if not col_ts or not col_sub or not col_ear:
+                continue
+            df[col_ts] = pd.to_datetime(df[col_ts], errors="coerce", dayfirst=True)
+            df[col_ear] = _normalize_br_numeric_series(df[col_ear])
+            df["submercado"] = df[col_sub].map(_normalize_submercado_name)
+            df = df.dropna(subset=[col_ts, col_ear, "submercado"])
+            if df.empty:
+                continue
+            ear_frames.append(df[[col_ts, "submercado", col_ear]].rename(columns={col_ts: "ts", col_ear: "valor"}))
+        except Exception:
+            continue
+
+    if ear_frames:
+        ear_df = pd.concat(ear_frames, ignore_index=True)
+        for sm, grp in ear_df.groupby("submercado"):
+            s = grp.set_index("ts")["valor"]
+            ear_by_sub[str(sm)] = _ensure_tz_naive_index(s).resample("ME").mean().dropna()
+
+    ena_frames: List[pd.DataFrame] = []
+    for ena_file in _find_ons_csv_all(ons, "ENA_Diario_Subsistema"):
+        try:
+            df = pd.read_csv(ena_file, sep=None, engine="python")
+            col_ts = next((c for c in ["ena_data", "din_instante", "instante", "ena_datainicio"] if c in df.columns), None)
+            col_sub = next((c for c in ["id_subsistema", "nom_subsistema", "submercado"] if c in df.columns), None)
+            col_ena = next(
+                (c for c in [
+                    "ena_armazenavel_regiao_mwmed",
+                    "ena_bruta_regiao_mwmed",
+                    "val_enaarmazenavel",
+                    "val_enabruta",
+                ] if c in df.columns),
+                None,
+            )
+            if not col_ts or not col_sub or not col_ena:
+                continue
+            df[col_ts] = pd.to_datetime(df[col_ts], errors="coerce", dayfirst=True)
+            df[col_ena] = _normalize_br_numeric_series(df[col_ena])
+            df["submercado"] = df[col_sub].map(_normalize_submercado_name)
+            df = df.dropna(subset=[col_ts, col_ena, "submercado"])
+            if df.empty:
+                continue
+            ena_frames.append(df[[col_ts, "submercado", col_ena]].rename(columns={col_ts: "ts", col_ena: "valor"}))
+        except Exception:
+            continue
+
+    if ena_frames:
+        ena_df = pd.concat(ena_frames, ignore_index=True)
+        for sm, grp in ena_df.groupby("submercado"):
+            s = grp.set_index("ts")["valor"]
+            ena_by_sub[str(sm)] = _ensure_tz_naive_index(s).resample("ME").mean().dropna()
+
+    return ear_by_sub, ena_by_sub
 
 
 def _compute_effective_availability_margin(
@@ -748,12 +885,18 @@ def _compute_advanced_cross_metrics(
     ons: Dict[str, Any],
     operacao: Dict[str, Any],
     pld_series: pd.Series,
+    pld_series_by_submercado: Optional[Dict[str, pd.Series]],
     ear_medio: Optional[float],
     ena_media: Optional[float],
     pld_medio: Optional[float],
     curtailment: Dict[str, Any],
 ) -> Dict[str, Any]:
     pld_series = _ensure_tz_naive_index(pld_series)
+    pld_series_by_submercado = {
+        _normalize_submercado_name(k) or str(k): _ensure_tz_naive_index(v)
+        for k, v in (pld_series_by_submercado or {}).items()
+        if isinstance(v, pd.Series)
+    }
 
     generation = operacao.get("generation", {})
     load = operacao.get("load", {})
@@ -866,21 +1009,46 @@ def _compute_advanced_cross_metrics(
         step_errors["pld_vs_carga_liquida"] = str(e)
 
     corr_pld_ear_mensal = None
-    ear_file = _find_ons_csv(ons, "EAR_Diario_Subsistema")
-    if ear_file and os.path.exists(ear_file) and not pld_series.empty:
+    pld_vs_ear_mensal_por_submercado: Dict[str, Optional[float]] = {}
+    pld_vs_ena_mensal_por_submercado: Dict[str, Optional[float]] = {}
+    ear_files = _find_ons_csv_all(ons, "EAR_Diario_Subsistema")
+    if ear_files and not pld_series.empty:
         try:
-            df_ear = pd.read_csv(ear_file, sep=None, engine="python")
-            col_ts = "ear_data" if "ear_data" in df_ear.columns else None
-            col_ear = "ear_verif_subsistema_percentual" if "ear_verif_subsistema_percentual" in df_ear.columns else None
-            if col_ts and col_ear:
-                df_ear[col_ts] = pd.to_datetime(df_ear[col_ts], errors="coerce", dayfirst=True)
-                df_ear[col_ear] = _normalize_br_numeric_series(df_ear[col_ear])
-                s_ear = df_ear.dropna(subset=[col_ts, col_ear]).set_index(col_ts)[col_ear]
+            ear_frames = []
+            for ear_file in ear_files:
+                try:
+                    df_ear = pd.read_csv(ear_file, sep=None, engine="python")
+                    col_ts = "ear_data" if "ear_data" in df_ear.columns else None
+                    col_ear = "ear_verif_subsistema_percentual" if "ear_verif_subsistema_percentual" in df_ear.columns else None
+                    if not col_ts or not col_ear:
+                        continue
+                    df_ear[col_ts] = pd.to_datetime(df_ear[col_ts], errors="coerce", dayfirst=True)
+                    df_ear[col_ear] = _normalize_br_numeric_series(df_ear[col_ear])
+                    df_ear = df_ear.dropna(subset=[col_ts, col_ear])
+                    if not df_ear.empty:
+                        ear_frames.append(df_ear[[col_ts, col_ear]])
+                except Exception:
+                    continue
+
+            if ear_frames:
+                df_ear = pd.concat(ear_frames, ignore_index=True).sort_values("ear_data")
+                s_ear = _ensure_tz_naive_index(df_ear.set_index("ear_data")["ear_verif_subsistema_percentual"])
                 ear_m = s_ear.resample("ME").mean()
-                pld_m = pld_series.resample("ME").mean()
+                pld_m = _ensure_tz_naive_index(pld_series).resample("ME").mean()
                 corr_pld_ear_mensal = _safe_corr(pld_m, ear_m, min_points=3)
         except Exception:
             pass
+
+    try:
+        ear_by_sub, ena_by_sub = _load_ear_ena_monthly_by_submercado(ons)
+        for sm, pld_sm in pld_series_by_submercado.items():
+            pld_m_sm = _ensure_tz_naive_index(pld_sm).resample("ME").mean()
+            ear_sm = ear_by_sub.get(sm)
+            ena_sm = ena_by_sub.get(sm)
+            pld_vs_ear_mensal_por_submercado[sm] = _safe_corr(pld_m_sm, ear_sm, min_points=3)
+            pld_vs_ena_mensal_por_submercado[sm] = _safe_corr(pld_m_sm, ena_sm, min_points=3)
+    except Exception as e:
+        step_errors["ear_ena_vs_pld_por_submercado"] = str(e)
 
     percentual_termica_h = pd.Series(dtype=float)
     if not termica.empty and not geracao_total.empty:
@@ -999,6 +1167,26 @@ def _compute_advanced_cross_metrics(
         except Exception as e:
             step_errors["gfom_vs_pld"] = str(e)
 
+    # GFOM x PLD por submercado (PLD horário pode diferir por submercado)
+    gfom_vs_pld_por_submercado: Dict[str, Any] = {}
+    gfom_sub = _load_gfom_hourly_by_submarket(ons)
+    for sm, gfdf in gfom_sub.items():
+        try:
+            pld_sm = pld_series_by_submercado.get(sm)
+            if pld_sm is None or pld_sm.empty:
+                continue
+            gfdf = gfdf.copy()
+            gfdf.index = pd.to_datetime(gfdf.index, errors="coerce", utc=True).tz_localize(None)
+            gfdf = gfdf[~gfdf.index.isna()].groupby(level=0).sum().sort_index()
+            gfom_pct_sm = (gfdf["gfom"] / gfdf["ger"].replace(0, np.nan) * 100).replace([np.inf, -np.inf], np.nan)
+            gfom_pct_sm = _ensure_tz_naive_index(gfom_pct_sm)
+            gfom_vs_pld_por_submercado[sm] = {
+                "gfom_pct": float((gfdf["gfom"].sum() / gfdf["ger"].sum()) * 100) if gfdf["ger"].sum() > 0 else None,
+                "corr": _safe_corr(pld_sm, gfom_pct_sm, min_points=24),
+            }
+        except Exception as e:
+            gfom_vs_pld_por_submercado[sm] = {"erro": str(e)}
+
     # Curtailement estrutural vs elétrico (nova abordagem)
     curtailment_class_nova = "indisponível"
     if curtailment.get("total_mwh", 0) > 0:
@@ -1045,6 +1233,8 @@ def _compute_advanced_cross_metrics(
             "pld_vs_carga_liquida_rolling_90d": rolling_corr_90d,
             "pld_vs_ear_mensal": corr_pld_ear_mensal,
             "pld_vs_percentual_termica": corr_pld_pct_termica,
+            "pld_vs_ear_mensal_por_submercado": pld_vs_ear_mensal_por_submercado,
+            "pld_vs_ena_mensal_por_submercado": pld_vs_ena_mensal_por_submercado,
         },
         "classificacoes": {
             "curtailment_x_ear": classificacao_curtail_ear,
@@ -1061,11 +1251,14 @@ def _compute_advanced_cross_metrics(
             "pld_vs_carga_liquida": corr_pld_carga_liquida,
             "pld_vs_ear_mensal": corr_pld_ear_mensal,
             "pld_vs_percentual_termica": corr_pld_pct_termica,
+            "pld_vs_ear_mensal_por_submercado": pld_vs_ear_mensal_por_submercado,
+            "pld_vs_ena_mensal_por_submercado": pld_vs_ena_mensal_por_submercado,
             "gfom_pct": gfom_pct,
             "gfom_vs_pld_corr": gfom_pld_corr,
             "gfom_vs_pld_cenario": gfom_pld_cenario,
             "horas_cenario_A": gfom_alto_pld_baixo,
             "horas_cenario_B": gfom_alto_pld_alto,
+            "gfom_vs_pld_por_submercado": gfom_vs_pld_por_submercado,
         },
         "capacidade_operativa_real": {
             "capacidade_disponivel_real_media_mw": float(capacidade_disp_h.mean()) if not capacidade_disp_h.empty else None,
@@ -1726,6 +1919,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     pld_por_submercado = {}
     pld_serie_7d = {}
     pld_series_full = pd.Series(dtype=float)
+    pld_series_by_submercado: Dict[str, pd.Series] = {}
 
     # --------------------------------------------
     # 🔎 Consolidar PLD histórico multi-ano (2021–2026)
@@ -1807,6 +2001,10 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
             if "submercado" in df_pld.columns:
                 for sub, grp in df_pld.groupby("submercado"):
                     pld_por_submercado[sub] = grp["pld_hora"].mean()
+                    sm = _normalize_submercado_name(sub) or str(sub)
+                    pld_series_by_submercado[sm] = _ensure_tz_naive_index(
+                        grp.sort_values("timestamp").set_index("timestamp")["pld_hora"]
+                    )
 
             # Últimos 7 dias
             last_ts = df_pld["timestamp"].max()
@@ -1947,6 +2145,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
             ons=ons,
             operacao=operacao,
             pld_series=pld_series_full,
+            pld_series_by_submercado=pld_series_by_submercado,
             ear_medio=hydrology.get("ear_medio"),
             ena_media=hydrology.get("ena_media"),
             pld_medio=pld_medio,
