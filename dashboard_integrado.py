@@ -1451,6 +1451,7 @@ def main():
         st.plotly_chart(fig, use_container_width=True)
 
     # PREMIUM - análise personalizada
+    premium_result = None  # placeholder: fluxo premium ainda não conectado nesta versão
     st.markdown("---")
     st.header("👤 PREMIUM — Visão Personalizada")
     if premium_result is None:
@@ -1530,9 +1531,16 @@ def main():
         st.json(core.get("metadata", {}))
 
     st.markdown("---")
+    meta = core.get("metadata", {}) if isinstance(core, dict) else {}
+    ultima_atualizacao = (
+        meta.get("generated_at")
+        or core.get("timestamp")
+        or "N/A"
+    )
+
     st.caption(f"""
     ⚡ **Kintuadi Energy Platform v2.0** | Dados em tempo real | 
-    Última atualização: {data['metadata'].get('timestamp', 'N/A')} | 
+    Última atualização: {ultima_atualizacao} | 
     Desenvolvido para gestores de energia
     """)
 

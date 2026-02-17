@@ -542,13 +542,15 @@ def _to_series(records: List[Dict[str, Any]], value_key: str) -> pd.Series:
         df = df.dropna(subset=["instante", value_key]).sort_values("instante")
         if df.empty:
             return pd.Series(dtype=float)
-        return df.set_index("instante")[value_key]
+        return _ensure_tz_naive_index(df.set_index("instante")[value_key])
     except Exception:
         return pd.Series(dtype=float)
 
 
 def _safe_corr(a: pd.Series, b: pd.Series, min_points: int = 24) -> Optional[float]:
     try:
+        a = _ensure_tz_naive_index(a)
+        b = _ensure_tz_naive_index(b)
         if a.empty or b.empty:
             return None
         df = pd.DataFrame({"a": a, "b": b}).dropna()
@@ -557,6 +559,37 @@ def _safe_corr(a: pd.Series, b: pd.Series, min_points: int = 24) -> Optional[flo
         return float(df["a"].corr(df["b"]))
     except Exception:
         return None
+
+
+def _ensure_tz_naive_index(series: pd.Series) -> pd.Series:
+    """Padroniza índice temporal para datetime naive e sem duplicatas."""
+    s = series.copy()
+
+    try:
+        # Força índice temporal consistente mesmo com mistura tz-aware/tz-naive
+        idx = pd.to_datetime(s.index, errors="coerce", utc=True)
+        s = s[~idx.isna()]
+        idx = idx[~idx.isna()].tz_localize(None)
+        s.index = idx
+    except Exception:
+        try:
+            if isinstance(s.index, pd.DatetimeIndex) and s.index.tz is not None:
+                s.index = s.index.tz_localize(None)
+        except Exception:
+            pass
+
+    try:
+        if isinstance(s.index, pd.DatetimeIndex) and s.index.has_duplicates:
+            if pd.api.types.is_numeric_dtype(s):
+                s = s.groupby(level=0).mean().sort_index()
+            else:
+                s = s[~s.index.duplicated(keep="last")].sort_index()
+        elif isinstance(s.index, pd.DatetimeIndex):
+            s = s.sort_index()
+    except Exception:
+        pass
+
+    return s
 
 
 def _dataset_file(ds: Dict[str, Any]) -> Optional[str]:
@@ -720,21 +753,24 @@ def _compute_advanced_cross_metrics(
     pld_medio: Optional[float],
     curtailment: Dict[str, Any],
 ) -> Dict[str, Any]:
+    pld_series = _ensure_tz_naive_index(pld_series)
+
     generation = operacao.get("generation", {})
     load = operacao.get("load", {})
+    step_errors: Dict[str, str] = {}
 
-    carga_sin = _to_series(load.get("sin", {}).get("serie", []), "carga")
+    carga_sin = _ensure_tz_naive_index(_to_series(load.get("sin", {}).get("serie", []), "carga"))
 
     solar_key = next((k for k in generation.keys() if "solar" in k.lower()), None)
     eolica_key = next((k for k in generation.keys() if "eolica" in k.lower()), None)
     termica_key = next((k for k in generation.keys() if "termica" in k.lower()), None)
 
-    solar = _to_series(generation.get(solar_key, {}).get("serie", []), "geracao") if solar_key else pd.Series(dtype=float)
-    eolica = _to_series(generation.get(eolica_key, {}).get("serie", []), "geracao") if eolica_key else pd.Series(dtype=float)
-    termica = _to_series(generation.get(termica_key, {}).get("serie", []), "geracao") if termica_key else pd.Series(dtype=float)
+    solar = _ensure_tz_naive_index(_to_series(generation.get(solar_key, {}).get("serie", []), "geracao")) if solar_key else pd.Series(dtype=float)
+    eolica = _ensure_tz_naive_index(_to_series(generation.get(eolica_key, {}).get("serie", []), "geracao")) if eolica_key else pd.Series(dtype=float)
+    termica = _ensure_tz_naive_index(_to_series(generation.get(termica_key, {}).get("serie", []), "geracao")) if termica_key else pd.Series(dtype=float)
 
     total_key = "sin" if "sin" in generation else None
-    geracao_total = _to_series(generation.get(total_key, {}).get("serie", []), "geracao") if total_key else pd.Series(dtype=float)
+    geracao_total = _ensure_tz_naive_index(_to_series(generation.get(total_key, {}).get("serie", []), "geracao")) if total_key else pd.Series(dtype=float)
 
     if geracao_total.empty:
         sin_parts = [
@@ -744,7 +780,7 @@ def _compute_advanced_cross_metrics(
         ]
         if sin_parts:
             df_sum = pd.concat(sin_parts, axis=1).fillna(0)
-            geracao_total = df_sum.sum(axis=1)
+            geracao_total = _ensure_tz_naive_index(df_sum.sum(axis=1))
 
     carga_liquida = pd.Series(dtype=float)
     horas_renovavel_gt_carga_liquida = None
@@ -814,15 +850,20 @@ def _compute_advanced_cross_metrics(
                 }
                 tendencia_estrutural_mensal = "alta" if mensal["margem_media"].iloc[-1] > mensal["margem_media"].iloc[0] else "baixa"
 
-    corr_pld_carga_liquida = _safe_corr(pld_series, carga_liquida, min_points=24)
-
+    corr_pld_carga_liquida = None
     rolling_corr_90d = None
-    if not pld_series.empty and not carga_liquida.empty:
-        df_rl = pd.DataFrame({"pld": pld_series, "carga_liquida": carga_liquida}).dropna().sort_index()
-        if len(df_rl) >= 24:
-            rolling = df_rl["pld"].rolling(window=90 * 24, min_periods=24).corr(df_rl["carga_liquida"])
-            if not rolling.dropna().empty:
-                rolling_corr_90d = float(rolling.dropna().iloc[-1])
+    try:
+        pld_series = _ensure_tz_naive_index(pld_series)
+        carga_liquida = _ensure_tz_naive_index(carga_liquida)
+        corr_pld_carga_liquida = _safe_corr(pld_series, carga_liquida, min_points=24)
+        if not pld_series.empty and not carga_liquida.empty:
+            df_rl = pd.DataFrame({"pld": pld_series, "carga_liquida": carga_liquida}).dropna().sort_index()
+            if len(df_rl) >= 24:
+                rolling = df_rl["pld"].rolling(window=90 * 24, min_periods=24).corr(df_rl["carga_liquida"])
+                if not rolling.dropna().empty:
+                    rolling_corr_90d = float(rolling.dropna().iloc[-1])
+    except Exception as e:
+        step_errors["pld_vs_carga_liquida"] = str(e)
 
     corr_pld_ear_mensal = None
     ear_file = _find_ons_csv(ons, "EAR_Diario_Subsistema")
@@ -927,28 +968,36 @@ def _compute_advanced_cross_metrics(
     gfom_alto_pld_baixo = None
     gfom_alto_pld_alto = None
     if not gfom_h.empty:
-        total_ger = float(gfom_h["ger"].sum()) if "ger" in gfom_h else 0
-        total_gfom = float(gfom_h["gfom"].sum()) if "gfom" in gfom_h else 0
-        if total_ger > 0:
-            gfom_pct = float((total_gfom / total_ger) * 100)
+        try:
+            gfom_h = gfom_h.copy()
+            gfom_h.index = pd.to_datetime(gfom_h.index, errors="coerce", utc=True).tz_localize(None)
+            gfom_h = gfom_h[~gfom_h.index.isna()]
+            gfom_h = gfom_h.groupby(level=0).sum().sort_index()
 
-        if not pld_series.empty:
-            gfom_pct_h = (gfom_h["gfom"] / gfom_h["ger"].replace(0, np.nan)) * 100
-            gfom_pct_h = gfom_pct_h.replace([np.inf, -np.inf], np.nan)
-            gfom_pld_corr = _safe_corr(pld_series, gfom_pct_h, min_points=24)
+            total_ger = float(gfom_h["ger"].sum()) if "ger" in gfom_h else 0
+            total_gfom = float(gfom_h["gfom"].sum()) if "gfom" in gfom_h else 0
+            if total_ger > 0:
+                gfom_pct = float((total_gfom / total_ger) * 100)
 
-            df_gp = pd.DataFrame({"pld": pld_series, "gfom_pct": gfom_pct_h}).dropna()
-            if not df_gp.empty:
-                pld_low = df_gp["pld"].quantile(0.2)
-                pld_high = df_gp["pld"].quantile(0.8)
-                gfom_high = df_gp["gfom_pct"].quantile(0.8)
-                gfom_low = df_gp["gfom_pct"].quantile(0.2)
-                gfom_alto_pld_baixo = int(((df_gp["pld"] <= pld_low) & (df_gp["gfom_pct"] >= gfom_high)).sum())
-                gfom_alto_pld_alto = int(((df_gp["pld"] >= pld_high) & (df_gp["gfom_pct"] <= gfom_low)).sum())
-                if gfom_alto_pld_baixo > gfom_alto_pld_alto:
-                    gfom_pld_cenario = "A: PLD baixo + GFOM alto"
-                else:
-                    gfom_pld_cenario = "B: PLD alto + GFOM baixo"
+            if not pld_series.empty:
+                gfom_pct_h = (gfom_h["gfom"] / gfom_h["ger"].replace(0, np.nan)) * 100
+                gfom_pct_h = _ensure_tz_naive_index(gfom_pct_h.replace([np.inf, -np.inf], np.nan))
+                gfom_pld_corr = _safe_corr(pld_series, gfom_pct_h, min_points=24)
+
+                df_gp = pd.DataFrame({"pld": pld_series, "gfom_pct": gfom_pct_h}).dropna()
+                if not df_gp.empty:
+                    pld_low = df_gp["pld"].quantile(0.2)
+                    pld_high = df_gp["pld"].quantile(0.8)
+                    gfom_high = df_gp["gfom_pct"].quantile(0.8)
+                    gfom_low = df_gp["gfom_pct"].quantile(0.2)
+                    gfom_alto_pld_baixo = int(((df_gp["pld"] <= pld_low) & (df_gp["gfom_pct"] >= gfom_high)).sum())
+                    gfom_alto_pld_alto = int(((df_gp["pld"] >= pld_high) & (df_gp["gfom_pct"] <= gfom_low)).sum())
+                    if gfom_alto_pld_baixo > gfom_alto_pld_alto:
+                        gfom_pld_cenario = "A: PLD baixo + GFOM alto"
+                    else:
+                        gfom_pld_cenario = "B: PLD alto + GFOM baixo"
+        except Exception as e:
+            step_errors["gfom_vs_pld"] = str(e)
 
     # Curtailement estrutural vs elétrico (nova abordagem)
     curtailment_class_nova = "indisponível"
@@ -962,21 +1011,28 @@ def _compute_advanced_cross_metrics(
 
     # Mudança de regime histórica (anual)
     mudanca_regime_anual = {}
-    if not pld_series.empty and not capacidade_disp_h.empty and not carga_sin.empty:
-        df_reg = pd.DataFrame({"pld": pld_series, "cap": capacidade_disp_h, "carga": carga_sin}).dropna()
-        if not df_reg.empty:
-            df_reg["stress"] = df_reg["carga"] / df_reg["cap"].replace(0, np.nan)
-            g = df_reg.groupby(df_reg.index.year).agg({"pld": "mean", "stress": "mean"}).dropna()
-            for yr, row in g.iterrows():
-                if row["stress"] < 0.8 and row["pld"] > pld_series.quantile(0.7):
-                    reg = "desalinhamento_estrutural"
-                elif row["stress"] > 1:
-                    reg = "estresse_operacional"
-                else:
-                    reg = "equilibrio"
-                mudanca_regime_anual[str(int(yr))] = reg
+    try:
+        capacidade_disp_h = _ensure_tz_naive_index(capacidade_disp_h)
+        carga_sin = _ensure_tz_naive_index(carga_sin)
+        if not pld_series.empty and not capacidade_disp_h.empty and not carga_sin.empty:
+            df_reg = pd.DataFrame({"pld": pld_series, "cap": capacidade_disp_h, "carga": carga_sin}).dropna()
+            if not df_reg.empty:
+                df_reg["stress"] = df_reg["carga"] / df_reg["cap"].replace(0, np.nan)
+                g = df_reg.groupby(df_reg.index.year).agg({"pld": "mean", "stress": "mean"}).dropna()
+                for yr, row in g.iterrows():
+                    if row["stress"] < 0.8 and row["pld"] > pld_series.quantile(0.7):
+                        reg = "desalinhamento_estrutural"
+                    elif row["stress"] > 1:
+                        reg = "estresse_operacional"
+                    else:
+                        reg = "equilibrio"
+                    mudanca_regime_anual[str(int(yr))] = reg
+    except Exception as e:
+        step_errors["mudanca_regime_historica_anual"] = str(e)
 
     return {
+        "status": "parcial" if step_errors else "disponível",
+        "diagnostico_etapas": step_errors,
         "margem_estrutural_oferta": margem_oferta,
         "dependencia_termica_efetiva_pct": dependencia_termica_pct,
         "regime_abundancia": regime_abundancia,
@@ -1056,6 +1112,10 @@ def compute_mcp_economico(
     geracao_hidraulica: pd.Series,
     cvu_medio: Optional[float]
 ) -> Dict[str, Any]:
+
+    pld_series = _ensure_tz_naive_index(pld_series)
+    carga_series = _ensure_tz_naive_index(carga_series)
+    geracao_hidraulica = _ensure_tz_naive_index(geracao_hidraulica)
 
     if pld_series.empty or carga_series.empty:
         return {"status": "indisponível"}
@@ -1741,7 +1801,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
             pld_min = df_pld["pld_hora"].min()
             pld_max = df_pld["pld_hora"].max()
 
-            pld_series_full = df_pld.set_index("timestamp")["pld_hora"]
+            pld_series_full = _ensure_tz_naive_index(df_pld.set_index("timestamp")["pld_hora"])
 
             # Submercados
             if "submercado" in df_pld.columns:
@@ -1817,7 +1877,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     geracao_hidro_sin_series = pd.Series(dtype=float)
 
     if pld_records and not df_pld.empty:
-        pld_series = (
+        pld_series = _ensure_tz_naive_index(
             df_pld
             .sort_values("timestamp")
             .set_index("timestamp")["pld_hora"]
