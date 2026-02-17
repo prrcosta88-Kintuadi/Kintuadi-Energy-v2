@@ -436,11 +436,10 @@ def load_core_analysis():
         return None
 
     try:
-        logger.info("Executando build_core_analysis (bootstrap da sessão do dashboard)...")
+        logger.info("Executando build_core_analysis (modo obrigatório no carregamento do dashboard)...")
         core = build_core_analysis(raw, output_dir="data")
 
         if isinstance(core, dict):
-            st.session_state["core_runtime"] = core
             return core
 
         logger.error("build_core_analysis retornou estrutura inválida.")
@@ -449,6 +448,28 @@ def load_core_analysis():
     except Exception as e:
         logger.error(f"Falha ao executar build_core_analysis: {e}")
         return None
+
+
+def diagnose_pipeline_status() -> Dict[str, str]:
+    """Diagnóstico simples por etapa (coleta → integração → análise)."""
+    status = {
+        "coleta": "erro",
+        "integracao": "erro",
+        "analise": "erro",
+    }
+
+    has_raw_latest = os.path.exists("data/kintuadi_latest.json")
+    has_any_raw = bool(glob.glob("data/kintuadi_*.json"))
+    has_core = os.path.exists("data/core_analysis_latest.json")
+
+    if has_raw_latest or has_any_raw:
+        status["coleta"] = "ok"
+        status["integracao"] = "ok"
+
+    if has_core:
+        status["analise"] = "ok"
+
+    return status
 
 
 def diagnose_pipeline_status() -> Dict[str, str]:

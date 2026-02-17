@@ -133,68 +133,40 @@ def _compute_hydrology_from_csv(ons: Dict[str, Any]) -> Dict[str, Any]:
     ear_medio = ena_media = tendencia = None
 
     try:
-        if ear_files:
-            ear_frames = []
-            for ear_file in ear_files:
-                try:
-                    df = pd.read_csv(ear_file, sep=None, engine="python")
-                    col = "ear_verif_subsistema_percentual"
-                    if col not in df.columns:
-                        continue
-                    df[col] = _normalize_br_numeric_series(df[col])
-                    if "ear_data" in df.columns:
-                        df["ear_data"] = pd.to_datetime(df["ear_data"], errors="coerce", dayfirst=True)
-                    df = df.dropna(subset=[col])
-                    if not df.empty:
-                        cols = [c for c in ["ear_data", col] if c in df.columns]
-                        ear_frames.append(df[cols])
-                except Exception:
-                    continue
+        if ear_file and os.path.exists(ear_file):
+            df = pd.read_csv(ear_file, sep=None, engine="python")
 
-            if ear_frames:
-                df_ear = pd.concat(ear_frames, ignore_index=True)
-                col = "ear_verif_subsistema_percentual"
-                if "ear_data" in df_ear.columns:
-                    df_ear = df_ear.dropna(subset=["ear_data"]).sort_values("ear_data")
-                df_ear = df_ear.dropna(subset=[col])
-                if not df_ear.empty:
-                    ear_medio = float(df_ear[col].mean())
-                    recent = df_ear.tail(7)[col].mean()
-                    past = df_ear.tail(30)[col].mean()
+            col = "ear_verif_subsistema_percentual"
+            if col in df.columns:
+                df[col] = _normalize_br_numeric_series(df[col])
+                if "ear_data" in df.columns:
+                    df["ear_data"] = pd.to_datetime(df["ear_data"], errors="coerce", dayfirst=True)
+                    df = df.sort_values("ear_data")
+                df = df.dropna(subset=[col])
+
+                if not df.empty:
+                    ear_medio = float(df[col].mean())
+
+                    recent = df.tail(7)[col].mean()
+                    past = df.tail(30)[col].mean()
                     tendencia = float(recent - past) if past else None
 
-        if ena_files:
-            ena_frames = []
+        if ena_file and os.path.exists(ena_file):
+            df = pd.read_csv(ena_file, sep=None, engine="python")
+
+            # Prioridade: ENA armazenável regional (subsistema) > ENA bruta regional > legado
             ena_candidates = [
                 "ena_armazenavel_regiao_mwmed",
                 "ena_bruta_regiao_mwmed",
                 "ena_verificada_mwmed",
             ]
-            for ena_file in ena_files:
-                try:
-                    df = pd.read_csv(ena_file, sep=None, engine="python")
-                    col = next((c for c in ena_candidates if c in df.columns), None)
-                    if not col:
-                        continue
-                    df[col] = _normalize_br_numeric_series(df[col])
-                    if "ena_data" in df.columns:
-                        df["ena_data"] = pd.to_datetime(df["ena_data"], errors="coerce", dayfirst=True)
-                    df = df.dropna(subset=[col])
-                    if not df.empty:
-                        cols = [c for c in ["ena_data", col] if c in df.columns]
-                        ena_frames.append(df[cols])
-                except Exception:
-                    continue
+            col = next((c for c in ena_candidates if c in df.columns), None)
 
-            if ena_frames:
-                df_ena = pd.concat(ena_frames, ignore_index=True)
-                col = next((c for c in ena_candidates if c in df_ena.columns), None)
-                if col:
-                    if "ena_data" in df_ena.columns:
-                        df_ena = df_ena.dropna(subset=["ena_data"]).sort_values("ena_data")
-                    df_ena = df_ena.dropna(subset=[col])
-                    if not df_ena.empty:
-                        ena_media = float(df_ena[col].mean())
+            if col is not None:
+                df[col] = _normalize_br_numeric_series(df[col])
+                df = df.dropna(subset=[col])
+                if not df.empty:
+                    ena_media = float(df[col].mean())
 
     except Exception:
         pass
