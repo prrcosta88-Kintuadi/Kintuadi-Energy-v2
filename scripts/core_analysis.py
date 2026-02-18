@@ -1288,6 +1288,12 @@ def _compute_advanced_cross_metrics(
     # GFOM x PLD por submercado (PLD horário pode diferir por submercado)
     gfom_vs_pld_por_submercado: Dict[str, Any] = {}
     gfom_sub = _load_gfom_hourly_by_submarket(ons)
+    sm_suffix = {
+        "NORTE": "n",
+        "NORDESTE": "ne",
+        "SUL": "s",
+        "SUDESTE": "se",
+    }
     for sm, gfdf in gfom_sub.items():
         try:
             pld_sm = pld_series_by_submercado.get(sm)
@@ -1298,8 +1304,9 @@ def _compute_advanced_cross_metrics(
             gfdf = gfdf[~gfdf.index.isna()].groupby(level=0).sum().sort_index()
             gfom_pct_sm = (gfdf["gfom"] / gfdf["ger"].replace(0, np.nan) * 100).replace([np.inf, -np.inf], np.nan)
             gfom_pct_sm = _ensure_tz_naive_index(gfom_pct_sm)
+            key_pct = f"gfom_{sm_suffix.get(sm, sm.lower())}_pct"
             gfom_vs_pld_por_submercado[sm] = {
-                "gfom_pct": float((gfdf["gfom"].sum() / gfdf["ger"].sum()) * 100) if gfdf["ger"].sum() > 0 else None,
+                key_pct: float((gfdf["gfom"].sum() / gfdf["ger"].sum()) * 100) if gfdf["ger"].sum() > 0 else None,
                 "corr": _safe_corr(pld_sm, gfom_pct_sm, min_points=24),
             }
         except Exception as e:
