@@ -424,34 +424,50 @@ def load_latest_raw():
         print(f"DEBUG: Erro ao carregar dados brutos: {e}")
         return None
 
+def is_mirror_mode() -> bool:
+    return os.environ.get("KINTUADI_DASHBOARD_MODE", "integrado").lower() == "espelho"
+
+
 def load_core_analysis():
-    """Carrega core do cache/arquivo; só executa build_core_analysis como último fallback."""
+    """
+    Modo integrado: SEMPRE executa build_core_analysis como primeira ação da sessão.
+    Modo espelho: nunca executa build; lê apenas core_analysis_latest.json.
+    """
     cached_core = st.session_state.get("core_runtime")
-    if isinstance(cached_core, dict):
+    if isinstance(cached_core, dict) and st.session_state.get("core_built_this_session"):
         return cached_core
 
     core_file = os.path.join("data", "core_analysis_latest.json")
-    if os.path.exists(core_file):
-        try:
-            with open(core_file, "r", encoding="utf-8") as f:
-                core = json.load(f)
-            if isinstance(core, dict):
-                st.session_state["core_runtime"] = core
-                return core
-        except Exception as e:
-            logger.warning(f"Falha ao carregar core_analysis_latest.json: {e}")
 
+    # Modo espelho: somente leitura do core persistido
+    if is_mirror_mode():
+        if isinstance(cached_core, dict):
+            return cached_core
+        if os.path.exists(core_file):
+            try:
+                with open(core_file, "r", encoding="utf-8") as f:
+                    core = json.load(f)
+                if isinstance(core, dict):
+                    st.session_state["core_runtime"] = core
+                    return core
+            except Exception as e:
+                logger.warning(f"Falha ao carregar core_analysis_latest.json: {e}")
+        logger.error("Modo espelho: core_analysis_latest.json indisponível.")
+        return None
+
+    # Modo integrado: build obrigatório no bootstrap da sessão
     raw = load_latest_raw()
     if not raw:
         logger.error("Dados brutos indisponíveis para executar build_core_analysis.")
         return None
 
     try:
-        logger.info("Executando build_core_analysis (bootstrap da sessão do dashboard)...")
+        logger.info("Executando build_core_analysis (ação obrigatória no bootstrap do dashboard_integrado)...")
         core = build_core_analysis(raw, output_dir="data")
 
         if isinstance(core, dict):
             st.session_state["core_runtime"] = core
+            st.session_state["core_built_this_session"] = True
             return core
 
         logger.error("build_core_analysis retornou estrutura inválida.")
@@ -459,6 +475,17 @@ def load_core_analysis():
 
     except Exception as e:
         logger.error(f"Falha ao executar build_core_analysis: {e}")
+
+        # fallback de leitura local apenas para não derrubar UI
+        if os.path.exists(core_file):
+            try:
+                with open(core_file, "r", encoding="utf-8") as f:
+                    core = json.load(f)
+                if isinstance(core, dict):
+                    st.session_state["core_runtime"] = core
+                    return core
+            except Exception:
+                pass
         return None
 
 
@@ -784,6 +811,14 @@ def main():
     # Carregar CSS dinâmico
     css = load_custom_css()
     st.markdown(css, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"], [data-testid="collapsedControl"] {display:none !important;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     with st.sidebar:
         st.markdown("## ⚡ **KINTUADI**")
