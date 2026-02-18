@@ -127,46 +127,98 @@ def _hydrology_status(ear: Optional[float]) -> Dict[str, Any]:
 
 
 def _compute_hydrology_from_csv(ons: Dict[str, Any]) -> Dict[str, Any]:
-    ear_files = _find_ons_csv_all(ons, "EAR_Diario_Subsistema")
-    ena_files = _find_ons_csv_all(ons, "ENA_Diario_Subsistema")
-
     ear_medio = ena_media = tendencia = None
 
     try:
-        if ear_file and os.path.exists(ear_file):
-            df = pd.read_csv(ear_file, sep=None, engine="python")
+        ear_by_sub, ena_by_sub = _load_ear_ena_monthly_by_submercado(ons)
 
-            col = "ear_verif_subsistema_percentual"
-            if col in df.columns:
-                df[col] = _normalize_br_numeric_series(df[col])
-                if "ear_data" in df.columns:
-                    df["ear_data"] = pd.to_datetime(df["ear_data"], errors="coerce", dayfirst=True)
-                    df = df.sort_values("ear_data")
-                df = df.dropna(subset=[col])
+        # EAR médio mensal consolidado entre submercados
+        if ear_by_sub:
+            df_ear = pd.concat(ear_by_sub, axis=1)
+            ear_mensal = df_ear.mean(axis=1, skipna=True).dropna().sort_index()
+            if not ear_mensal.empty:
+                ear_medio = float(ear_mensal.mean())
+                recent = float(ear_mensal.tail(3).mean())
+                past = float(ear_mensal.tail(12).mean())
+                tendencia = float(recent - past) if past else None
 
-                if not df.empty:
-                    ear_medio = float(df[col].mean())
+        # ENA média mensal consolidada entre submercados
+        if ena_by_sub:
+            df_ena = pd.concat(ena_by_sub, axis=1)
+            ena_mensal = df_ena.mean(axis=1, skipna=True).dropna().sort_index()
+            if not ena_mensal.empty:
+                ena_media = float(ena_mensal.mean())
 
-                    recent = df.tail(7)[col].mean()
-                    past = df.tail(30)[col].mean()
-                    tendencia = float(recent - past) if past else None
+        # Fallback para esquema legado caso mapeamento de submercado não esteja disponível.
+        if ear_medio is None or ena_media is None:
+            ear_files = _find_ons_csv_all(ons, "EAR_Diario_Subsistema")
+            ena_files = _find_ons_csv_all(ons, "ENA_Diario_Subsistema")
 
-        if ena_file and os.path.exists(ena_file):
-            df = pd.read_csv(ena_file, sep=None, engine="python")
+            if ear_medio is None and ear_files:
+                ear_frames = []
+                for ear_file in ear_files:
+                    try:
+                        df = pd.read_csv(ear_file, sep=None, engine="python")
+                        col = "ear_verif_subsistema_percentual"
+                        col_ts = next((c for c in ["ear_data", "din_instante", "instante"] if c in df.columns), None)
+                        if col not in df.columns:
+                            continue
+                        df[col] = _normalize_br_numeric_series(df[col])
+                        if col_ts:
+                            df[col_ts] = pd.to_datetime(df[col_ts], errors="coerce", dayfirst=True)
+                        df = df.dropna(subset=[col])
+                        if not df.empty:
+                            cols = [c for c in [col_ts, col] if c]
+                            ear_frames.append(df[cols])
+                    except Exception:
+                        continue
 
-            # Prioridade: ENA armazenável regional (subsistema) > ENA bruta regional > legado
-            ena_candidates = [
-                "ena_armazenavel_regiao_mwmed",
-                "ena_bruta_regiao_mwmed",
-                "ena_verificada_mwmed",
-            ]
-            col = next((c for c in ena_candidates if c in df.columns), None)
+                if ear_frames:
+                    df_ear = pd.concat(ear_frames, ignore_index=True)
+                    if df_ear.shape[1] >= 2:
+                        ts_col, val_col = df_ear.columns[0], df_ear.columns[1]
+                        if ts_col:
+                            df_ear = df_ear.dropna(subset=[ts_col]).sort_values(ts_col)
+                        df_ear = df_ear.dropna(subset=[val_col])
+                        if not df_ear.empty:
+                            ear_medio = float(df_ear[val_col].mean())
+                            recent = df_ear.tail(7)[val_col].mean()
+                            past = df_ear.tail(30)[val_col].mean()
+                            tendencia = float(recent - past) if past else tendencia
 
-            if col is not None:
-                df[col] = _normalize_br_numeric_series(df[col])
-                df = df.dropna(subset=[col])
-                if not df.empty:
-                    ena_media = float(df[col].mean())
+            if ena_media is None and ena_files:
+                ena_frames = []
+                ena_candidates = [
+                    "ena_armazenavel_regiao_mwmed",
+                    "ena_bruta_regiao_mwmed",
+                    "ena_verificada_mwmed",
+                    "val_enaarmazenavel",
+                    "val_enabruta",
+                ]
+                for ena_file in ena_files:
+                    try:
+                        df = pd.read_csv(ena_file, sep=None, engine="python")
+                        col = next((c for c in ena_candidates if c in df.columns), None)
+                        col_ts = next((c for c in ["ena_data", "din_instante", "instante", "ena_datainicio"] if c in df.columns), None)
+                        if not col:
+                            continue
+                        df[col] = _normalize_br_numeric_series(df[col])
+                        if col_ts:
+                            df[col_ts] = pd.to_datetime(df[col_ts], errors="coerce", dayfirst=True)
+                        df = df.dropna(subset=[col])
+                        if not df.empty:
+                            cols = [c for c in [col_ts, col] if c]
+                            ena_frames.append(df[cols])
+                    except Exception:
+                        continue
+
+                if ena_frames:
+                    df_ena = pd.concat(ena_frames, ignore_index=True)
+                    val_col = next((c for c in ena_candidates if c in df_ena.columns), None)
+                    if val_col:
+                        df_ena = df_ena.dropna(subset=[val_col])
+                        if not df_ena.empty:
+                            ena_media = float(df_ena[val_col].mean())
 
     except Exception:
         pass
@@ -615,11 +667,22 @@ def _dataset_file(ds: Dict[str, Any]) -> Optional[str]:
 
 
 def _normalize_submercado_name(value: Any) -> Optional[str]:
-    v = str(value).strip().upper() if value is not None else ""
+    if value is None:
+        return None
+    v = str(value).strip().upper()
+    v = v.replace("/", "").replace("-", "").replace(" ", "")
+
     mapping = {
+        "1": "SUDESTE",
+        "2": "SUL",
+        "3": "NORDESTE",
+        "4": "NORTE",
         "N": "NORTE",
         "NE": "NORDESTE",
         "SE": "SUDESTE",
+        "SECO": "SUDESTE",
+        "SUDESTECENTROOESTE": "SUDESTE",
+        "SUDESTECENTRO-OESTE": "SUDESTE",
         "S": "SUL",
         "NORTE": "NORTE",
         "NORDESTE": "NORDESTE",
@@ -1039,6 +1102,9 @@ def _compute_advanced_cross_metrics(
         except Exception:
             pass
 
+    ear_media_mensal = None
+    ena_media_mensal = None
+    matriz_cenario_mensal: List[Dict[str, Any]] = []
     try:
         ear_by_sub, ena_by_sub = _load_ear_ena_monthly_by_submercado(ons)
         for sm, pld_sm in pld_series_by_submercado.items():
@@ -1047,6 +1113,58 @@ def _compute_advanced_cross_metrics(
             ena_sm = ena_by_sub.get(sm)
             pld_vs_ear_mensal_por_submercado[sm] = _safe_corr(pld_m_sm, ear_sm, min_points=3)
             pld_vs_ena_mensal_por_submercado[sm] = _safe_corr(pld_m_sm, ena_sm, min_points=3)
+
+        if ear_by_sub:
+            ear_media_mensal = {
+                i.strftime("%Y-%m"): float(v)
+                for i, v in pd.concat(ear_by_sub, axis=1).mean(axis=1, skipna=True).dropna().sort_index().items()
+            }
+        if ena_by_sub:
+            ena_media_mensal = {
+                i.strftime("%Y-%m"): float(v)
+                for i, v in pd.concat(ena_by_sub, axis=1).mean(axis=1, skipna=True).dropna().sort_index().items()
+            }
+
+        pld_m_global = _ensure_tz_naive_index(pld_series).resample("ME").mean()
+        carga_liquida_m = _ensure_tz_naive_index(carga_liquida).resample("ME").mean() if not carga_liquida.empty else pd.Series(dtype=float)
+        termica_pct_m = (pd.DataFrame({"termica": termica, "total": geracao_total}).dropna().query("total > 0").eval("(termica/total)*100").resample("ME").mean() if (not termica.empty and not geracao_total.empty) else pd.Series(dtype=float))
+
+        idx = pld_m_global.index
+        for extra in [
+            pd.to_datetime(list((ear_media_mensal or {}).keys()), format="%Y-%m", errors="coerce") if ear_media_mensal else pd.DatetimeIndex([]),
+            pd.to_datetime(list((ena_media_mensal or {}).keys()), format="%Y-%m", errors="coerce") if ena_media_mensal else pd.DatetimeIndex([]),
+            carga_liquida_m.index if not carga_liquida_m.empty else pd.DatetimeIndex([]),
+            termica_pct_m.index if not termica_pct_m.empty else pd.DatetimeIndex([]),
+        ]:
+            idx = idx.union(extra)
+
+        for month in sorted([i for i in idx if not pd.isna(i)]):
+            pld_v = float(pld_m_global.get(month)) if month in pld_m_global.index and pd.notna(pld_m_global.get(month)) else None
+            ear_v = ear_media_mensal.get(month.strftime("%Y-%m")) if ear_media_mensal else None
+            ena_v = ena_media_mensal.get(month.strftime("%Y-%m")) if ena_media_mensal else None
+            carga_v = float(carga_liquida_m.get(month)) if month in carga_liquida_m.index and pd.notna(carga_liquida_m.get(month)) else None
+            term_v = float(termica_pct_m.get(month)) if month in termica_pct_m.index and pd.notna(termica_pct_m.get(month)) else None
+
+            if pld_v is None or ear_v is None:
+                cenario = "dados_insuficientes"
+            elif pld_v >= PLD_TETO_ESTRUTURAL * 0.8 and ear_v < 50:
+                cenario = "estresse_hidrico"
+            elif pld_v <= PLD_PISO * 1.2 and ear_v > 65:
+                cenario = "abundancia_hidrica"
+            elif term_v is not None and term_v > 25 and pld_medio is not None and pld_v > pld_medio:
+                cenario = "pressao_termica"
+            else:
+                cenario = "equilibrio_operacional"
+
+            matriz_cenario_mensal.append({
+                "mes": month.strftime("%Y-%m"),
+                "pld_medio": pld_v,
+                "ear_medio": ear_v,
+                "ena_media": ena_v,
+                "carga_liquida_media": carga_v,
+                "percentual_termica_medio": term_v,
+                "cenario": cenario,
+            })
     except Exception as e:
         step_errors["ear_ena_vs_pld_por_submercado"] = str(e)
 
@@ -1225,6 +1343,9 @@ def _compute_advanced_cross_metrics(
         "dependencia_termica_efetiva_pct": dependencia_termica_pct,
         "regime_abundancia": regime_abundancia,
         "ena_media": ena_media,
+        "ear_media_mensal": ear_media_mensal,
+        "ena_media_mensal": ena_media_mensal,
+        "matriz_cenario_mensal": matriz_cenario_mensal,
         "horas_renovavel_gt_carga_liquida": horas_renovavel_gt_carga_liquida,
         "curtailment_percentual_total": curtailment.get("curtailment_pct_total"),
         "correlacoes": {
@@ -1722,10 +1843,25 @@ def _compute_cvu_from_csv(ons: Dict[str, Any]) -> Optional[float]:
         if "val_cvu" not in df.columns:
             return None
 
-        cvus = df["val_cvu"].dropna()
-        cvus = cvus[cvus > 0]
+        # CVU é semanal (dat_iniciosemana/dat_fimsemana).
+        # Primeiro tenta usar a última semana disponível; fallback para média global positiva.
+        df["val_cvu"] = _normalize_br_numeric_series(df["val_cvu"])
+        df = df.dropna(subset=["val_cvu"])
+        df = df[df["val_cvu"] > 0]
+        if df.empty:
+            return None
 
-        return float(cvus.mean()) if not cvus.empty else None
+        col_fim = "dat_fimsemana" if "dat_fimsemana" in df.columns else None
+        if col_fim:
+            df[col_fim] = pd.to_datetime(df[col_fim], errors="coerce", dayfirst=True)
+            df_semana = df.dropna(subset=[col_fim])
+            if not df_semana.empty:
+                ultima_semana = df_semana[col_fim].max()
+                semana_atual = df_semana[df_semana[col_fim] == ultima_semana]
+                if not semana_atual.empty:
+                    return float(semana_atual["val_cvu"].mean())
+
+        return float(df["val_cvu"].mean())
 
     except Exception:
         return None

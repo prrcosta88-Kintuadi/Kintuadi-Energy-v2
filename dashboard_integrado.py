@@ -494,6 +494,28 @@ def diagnose_pipeline_status() -> Dict[str, str]:
     return status
 
 
+def diagnose_pipeline_status() -> Dict[str, str]:
+    """Diagnóstico simples por etapa (coleta → integração → análise)."""
+    status = {
+        "coleta": "erro",
+        "integracao": "erro",
+        "analise": "erro",
+    }
+
+    has_raw_latest = os.path.exists("data/kintuadi_latest.json")
+    has_any_raw = bool(glob.glob("data/kintuadi_*.json"))
+    has_core = os.path.exists("data/core_analysis_latest.json")
+
+    if has_raw_latest or has_any_raw:
+        status["coleta"] = "ok"
+        status["integracao"] = "ok"
+
+    if has_core:
+        status["analise"] = "ok"
+
+    return status
+
+
 def run_data_collector():
     """Executa o coletor de dados importando diretamente a função."""
     try:
@@ -697,6 +719,95 @@ def analisar_formacao_preco_pld(core):
             resultados["severidade"] = "warning"
     
     return resultados, carga_analise, hidro_analise
+
+
+def _normalize_submercado_dashboard(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    v = str(value).strip().upper().replace("/", "").replace("-", "").replace(" ", "")
+    mapping = {
+        "1": "SUDESTE", "2": "SUL", "3": "NORDESTE", "4": "NORTE",
+        "N": "NORTE", "NE": "NORDESTE", "SE": "SUDESTE", "SECO": "SUDESTE", "S": "SUL",
+        "NORTE": "NORTE", "NORDESTE": "NORDESTE", "SUDESTE": "SUDESTE", "SUL": "SUL",
+    }
+    return mapping.get(v)
+
+
+def _classificar_cenario_horario(pld: Optional[float], ear_mensal: Optional[float], termica_mensal: Optional[float], pld_medio_global: Optional[float]) -> str:
+    if pld is None or ear_mensal is None:
+        return "dados_insuficientes"
+    if pld >= 785.27 * 0.8 and ear_mensal < 50:
+        return "estresse_hidrico"
+    if pld <= 57.31 * 1.2 and ear_mensal > 65:
+        return "abundancia_hidrica"
+    if termica_mensal is not None and termica_mensal > 25 and pld_medio_global is not None and pld > pld_medio_global:
+        return "pressao_termica"
+    return "equilibrio_operacional"
+
+
+def build_hourly_scenario_table(core: Dict[str, Any], selected_day: datetime.date, submercado: str = "SIN") -> pd.DataFrame:
+    ccee = core.get("ccee", {}) if isinstance(core, dict) else {}
+    rows = ccee.get("data", []) if isinstance(ccee, dict) else []
+    if not isinstance(rows, list) or not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    required = {"mes_referencia", "dia", "hora", "pld_hora", "submercado"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    df["mes_referencia"] = df["mes_referencia"].astype(str).str.zfill(6)
+    df["dia"] = pd.to_numeric(df["dia"], errors="coerce")
+    df["hora"] = pd.to_numeric(df["hora"], errors="coerce")
+    df["pld_hora"] = pd.to_numeric(df["pld_hora"], errors="coerce")
+    df["submercado_norm"] = df["submercado"].map(_normalize_submercado_dashboard)
+
+    df["instante"] = (
+        pd.to_datetime(df["mes_referencia"] + "01", format="%Y%m%d", errors="coerce")
+        + pd.to_timedelta(df["dia"].fillna(1) - 1, unit="D")
+        + pd.to_timedelta(df["hora"].fillna(0), unit="h")
+    )
+    df = df.dropna(subset=["instante", "pld_hora"])
+
+    if submercado != "SIN":
+        df = df[df["submercado_norm"] == submercado]
+
+    day_ts = pd.Timestamp(selected_day)
+    df = df[df["instante"].dt.floor("D") == day_ts]
+    if df.empty:
+        return pd.DataFrame()
+
+    hourly = df.groupby(df["instante"].dt.floor("h"))["pld_hora"].mean().reset_index()
+    hourly = hourly.rename(columns={"pld_hora": "pld_hora_medio"})
+
+    adv = core.get("advanced_metrics", {}) if isinstance(core, dict) else {}
+    month_key = day_ts.strftime("%Y-%m")
+    ear_mensal = (adv.get("ear_media_mensal") or {}).get(month_key)
+    ena_mensal = (adv.get("ena_media_mensal") or {}).get(month_key)
+
+    termica_mensal = None
+    for row in (adv.get("matriz_cenario_mensal") or []):
+        if isinstance(row, dict) and row.get("mes") == month_key:
+            termica_mensal = row.get("percentual_termica_medio")
+            break
+
+    pld_medio_global = (core.get("prices") or {}).get("pld_medio")
+
+    hourly["ear_mensal"] = ear_mensal
+    hourly["ena_mensal"] = ena_mensal
+    hourly["percentual_termica_mensal"] = termica_mensal
+    hourly["cenario"] = hourly["pld_hora_medio"].apply(
+        lambda p: _classificar_cenario_horario(
+            float(p) if pd.notna(p) else None,
+            float(ear_mensal) if ear_mensal is not None else None,
+            float(termica_mensal) if termica_mensal is not None else None,
+            float(pld_medio_global) if pld_medio_global is not None else None,
+        )
+    )
+
+    hourly = hourly.rename(columns={"instante": "hora"})
+    return hourly
+
 
 # -----------------------------------------------------------------------------
 # MAIN
@@ -1010,7 +1121,30 @@ def main():
                 "Margem p5": [margem_p5_m.get(r) for r in rows],
             })
             st.markdown("**Margem operativa real (mensal):**")
-            st.dataframe(df_marg, use_container_width=True, hide_index=True)
+            st.dataframe(df_marg, width="stretch", hide_index=True)
+
+        st.markdown("**Consulta horária por dia (sem reprocessar o build_core_analysis):**")
+        c_sel1, c_sel2 = st.columns([1, 1])
+        with c_sel1:
+            dia_consulta = st.date_input(
+                "Selecione o dia",
+                value=datetime.now().date(),
+                key="dia_consulta_horaria",
+                help="A consulta lê apenas o core_analysis_latest.json carregado.",
+            )
+        with c_sel2:
+            sub_opt = st.selectbox(
+                "Submercado",
+                options=["SIN", "NORTE", "NORDESTE", "SUDESTE", "SUL"],
+                index=0,
+                key="submercado_consulta_horaria",
+            )
+
+        df_horario = build_hourly_scenario_table(core, dia_consulta, submercado=sub_opt)
+        if not df_horario.empty:
+            st.dataframe(df_horario, width="stretch", hide_index=True)
+        else:
+            st.info("Sem dados horários no dia/submercado selecionado dentro do core carregado.")
     else:
         st.info("Métricas avançadas indisponíveis no core.")
 
