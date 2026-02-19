@@ -11,7 +11,7 @@ VERSÃO REVISADA: Análise térmica com dupla perspectiva (sistema vs gerador)
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
 
@@ -57,6 +57,10 @@ def _find_ons_csv(ons: Dict[str, Any], dataset_prefix: str) -> Optional[str]:
         name = ds.get("dataset", "")
         file = ds.get("file")
 
+        # Compatibilidade com paths em formato Windows (ex.: data\ons\2026\arquivo.csv)
+        if isinstance(file, str):
+            file = file.replace("\\", os.sep)
+
         if name.startswith(dataset_prefix) and file and os.path.exists(file):
             candidates.append((name, file))
 
@@ -67,6 +71,21 @@ def _find_ons_csv(ons: Dict[str, Any], dataset_prefix: str) -> Optional[str]:
     candidates.sort(reverse=True)
 
     return candidates[0][1]
+
+
+def _find_ons_csv_all(ons: Dict[str, Any], dataset_prefix: str) -> List[str]:
+    """Retorna todos os arquivos existentes de um dataset por prefixo, ordenados por nome (desc)."""
+    candidates: List[Tuple[str, str]] = []
+    for ds in ons.get("datasets", []):
+        name = ds.get("dataset", "")
+        file = ds.get("file")
+        if isinstance(file, str):
+            file = file.replace("\\", os.sep)
+        if name.startswith(dataset_prefix) and file and os.path.exists(file):
+            candidates.append((name, file))
+
+    candidates.sort(reverse=True)
+    return [file for _, file in candidates]
 
 def _extract_ccee_records(obj: Any) -> List[Dict[str, Any]]:
     if not obj:
@@ -108,28 +127,98 @@ def _hydrology_status(ear: Optional[float]) -> Dict[str, Any]:
 
 
 def _compute_hydrology_from_csv(ons: Dict[str, Any]) -> Dict[str, Any]:
-    ear_file = _find_ons_csv(ons, "EAR_Diario_Subsistema")
-    ena_file = _find_ons_csv(ons, "ENA_Diario_Subsistema")
-
     ear_medio = ena_media = tendencia = None
 
     try:
-        if ear_file and os.path.exists(ear_file):
-            df = pd.read_csv(ear_file, sep=None, engine="python")
+        ear_by_sub, ena_by_sub = _load_ear_ena_monthly_by_submercado(ons)
 
-            col = "ear_verif_subsistema_percentual"
-            if col in df.columns:
-                ear_medio = float(df[col].mean())
-
-                recent = df.tail(7)[col].mean()
-                past = df.tail(30)[col].mean()
+        # EAR médio mensal consolidado entre submercados
+        if ear_by_sub:
+            df_ear = pd.concat(ear_by_sub, axis=1)
+            ear_mensal = df_ear.mean(axis=1, skipna=True).dropna().sort_index()
+            if not ear_mensal.empty:
+                ear_medio = float(ear_mensal.mean())
+                recent = float(ear_mensal.tail(3).mean())
+                past = float(ear_mensal.tail(12).mean())
                 tendencia = float(recent - past) if past else None
 
-        if ena_file and os.path.exists(ena_file):
-            df = pd.read_csv(ena_file, sep=None, engine="python")
-            col = "ena_verificada_mwmed"
-            if col in df.columns:
-                ena_media = float(df[col].mean())
+        # ENA média mensal consolidada entre submercados
+        if ena_by_sub:
+            df_ena = pd.concat(ena_by_sub, axis=1)
+            ena_mensal = df_ena.mean(axis=1, skipna=True).dropna().sort_index()
+            if not ena_mensal.empty:
+                ena_media = float(ena_mensal.mean())
+
+        # Fallback para esquema legado caso mapeamento de submercado não esteja disponível.
+        if ear_medio is None or ena_media is None:
+            ear_files = _find_ons_csv_all(ons, "EAR_Diario_Subsistema")
+            ena_files = _find_ons_csv_all(ons, "ENA_Diario_Subsistema")
+
+            if ear_medio is None and ear_files:
+                ear_frames = []
+                for ear_file in ear_files:
+                    try:
+                        df = pd.read_csv(ear_file, sep=None, engine="python")
+                        col = "ear_verif_subsistema_percentual"
+                        col_ts = next((c for c in ["ear_data", "din_instante", "instante"] if c in df.columns), None)
+                        if col not in df.columns:
+                            continue
+                        df[col] = _normalize_br_numeric_series(df[col])
+                        if col_ts:
+                            df[col_ts] = _parse_date_series(df[col_ts])
+                        df = df.dropna(subset=[col])
+                        if not df.empty:
+                            cols = [c for c in [col_ts, col] if c]
+                            ear_frames.append(df[cols])
+                    except Exception:
+                        continue
+
+                if ear_frames:
+                    df_ear = pd.concat(ear_frames, ignore_index=True)
+                    if df_ear.shape[1] >= 2:
+                        ts_col, val_col = df_ear.columns[0], df_ear.columns[1]
+                        if ts_col:
+                            df_ear = df_ear.dropna(subset=[ts_col]).sort_values(ts_col)
+                        df_ear = df_ear.dropna(subset=[val_col])
+                        if not df_ear.empty:
+                            ear_medio = float(df_ear[val_col].mean())
+                            recent = df_ear.tail(7)[val_col].mean()
+                            past = df_ear.tail(30)[val_col].mean()
+                            tendencia = float(recent - past) if past else tendencia
+
+            if ena_media is None and ena_files:
+                ena_frames = []
+                ena_candidates = [
+                    "ena_armazenavel_regiao_mwmed",
+                    "ena_bruta_regiao_mwmed",
+                    "ena_verificada_mwmed",
+                    "val_enaarmazenavel",
+                    "val_enabruta",
+                ]
+                for ena_file in ena_files:
+                    try:
+                        df = pd.read_csv(ena_file, sep=None, engine="python")
+                        col = next((c for c in ena_candidates if c in df.columns), None)
+                        col_ts = next((c for c in ["ena_data", "din_instante", "instante", "ena_datainicio"] if c in df.columns), None)
+                        if not col:
+                            continue
+                        df[col] = _normalize_br_numeric_series(df[col])
+                        if col_ts:
+                            df[col_ts] = _parse_date_series(df[col_ts])
+                        df = df.dropna(subset=[col])
+                        if not df.empty:
+                            cols = [c for c in [col_ts, col] if c]
+                            ena_frames.append(df[cols])
+                    except Exception:
+                        continue
+
+                if ena_frames:
+                    df_ena = pd.concat(ena_frames, ignore_index=True)
+                    val_col = next((c for c in ena_candidates if c in df_ena.columns), None)
+                    if val_col:
+                        df_ena = df_ena.dropna(subset=[val_col])
+                        if not df_ena.empty:
+                            ena_media = float(df_ena[val_col].mean())
 
     except Exception:
         pass
@@ -212,6 +301,147 @@ def _extract_energia_agora(ons: Dict[str, Any]) -> Dict[str, Any]:
         "status": status,
     }
 
+
+def _normalize_power_to_mw(series: pd.Series) -> pd.Series:
+    """
+    Normaliza potência para MW quando os dados parecem estar em Watts.
+    Heurística: medianas muito altas (>1e6) são tratadas como W.
+    """
+    if series.empty:
+        return series
+
+    med = series.dropna().abs().median() if not series.dropna().empty else 0
+    if med > 1_000_000:
+        return series / 1_000_000.0
+    return series
+
+
+def _extract_open_data_historical_operation(ons: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Consolida séries históricas de operação via Open Data:
+    - Geração por usina horária (GERACAO_USINA-2)
+    - Curva de carga (CURVA_CARGA)
+    """
+    generation: Dict[str, Dict[str, Any]] = {}
+    load: Dict[str, Dict[str, Any]] = {}
+
+    ger_frames = []
+    carga_frames = []
+
+    for ds in ons.get("datasets", []):
+        name = ds.get("dataset", "")
+        file = ds.get("file")
+        if not file or not os.path.exists(file):
+            continue
+
+        name_lower = name.lower()
+
+        # Geração usina horária
+        if name_lower.startswith("geracao_usina_horaria"):
+            try:
+                df = pd.read_csv(file, sep=None, engine="python")
+                required = {"din_instante", "nom_tipousina", "val_geracao"}
+                if not required.issubset(df.columns):
+                    continue
+
+                df["din_instante"] = _parse_date_series(df["din_instante"])
+                df["val_geracao"] = _normalize_br_numeric_series(df["val_geracao"])
+                df = df.dropna(subset=["din_instante", "val_geracao"])
+                if df.empty:
+                    continue
+                ger_frames.append(df[["din_instante", "nom_tipousina", "val_geracao"]])
+            except Exception:
+                continue
+
+        # Curva de carga anual em XLSX
+        if name_lower.startswith("curva_carga_"):
+            try:
+                df = pd.read_excel(file)
+                required = {"id_subsistema", "din_instante", "val_cargaenergiahomwmed"}
+                if not required.issubset(df.columns):
+                    continue
+
+                df["din_instante"] = _parse_date_series(df["din_instante"])
+                df["val_cargaenergiahomwmed"] = _normalize_br_numeric_series(df["val_cargaenergiahomwmed"])
+                df = df.dropna(subset=["din_instante", "id_subsistema", "val_cargaenergiahomwmed"])
+                if df.empty:
+                    continue
+                carga_frames.append(df[["din_instante", "id_subsistema", "val_cargaenergiahomwmed"]])
+            except Exception:
+                continue
+
+    # ---------- Consolidação de geração ----------
+    if ger_frames:
+        g = pd.concat(ger_frames, ignore_index=True)
+        g["val_geracao"] = _normalize_power_to_mw(g["val_geracao"])
+
+        total_h = g.groupby("din_instante")["val_geracao"].sum().sort_index()
+        generation["sin"] = {
+            "media": float(total_h.mean()),
+            "max": float(total_h.max()),
+            "min": float(total_h.min()),
+            "rampa_max": float(total_h.diff().abs().max()) if len(total_h) > 1 else 0,
+            "serie": total_h.reset_index().rename(columns={"din_instante": "instante", "val_geracao": "geracao"}).to_dict("records"),
+        }
+
+        tip_map = {
+            "EOL": "sin_eolica",
+            "FOTOV": "sin_solar",
+            "SOLAR": "sin_solar",
+            "TÉRM": "sin_termica",
+            "TERM": "sin_termica",
+            "HIDRO": "sin_hidraulica",
+            "HIDR": "sin_hidraulica",
+            "NUCL": "sin_nuclear",
+        }
+        for key_part, out_key in tip_map.items():
+            grp = g[g["nom_tipousina"].astype(str).str.upper().str.contains(key_part, na=False)]
+            if grp.empty:
+                continue
+            s = grp.groupby("din_instante")["val_geracao"].sum().sort_index()
+            generation[out_key] = {
+                "media": float(s.mean()),
+                "max": float(s.max()),
+                "min": float(s.min()),
+                "rampa_max": float(s.diff().abs().max()) if len(s) > 1 else 0,
+                "serie": s.reset_index().rename(columns={"din_instante": "instante", "val_geracao": "geracao"}).to_dict("records"),
+            }
+
+    # ---------- Consolidação de carga ----------
+    if carga_frames:
+        c = pd.concat(carga_frames, ignore_index=True)
+        c["id_subsistema"] = c["id_subsistema"].astype(str).str.upper()
+        c = c[c["id_subsistema"].isin(["N", "NE", "SE", "S"])]
+
+        sin = c.groupby("din_instante")["val_cargaenergiahomwmed"].sum().sort_index()
+        load["sin"] = {
+            "media": float(sin.mean()),
+            "max": float(sin.max()),
+            "min": float(sin.min()),
+            "rampa_max": float(sin.diff().abs().max()) if len(sin) > 1 else 0,
+            "serie": sin.reset_index().rename(columns={"din_instante": "instante", "val_cargaenergiahomwmed": "carga"}).to_dict("records"),
+        }
+
+    status = "disponível" if generation or load else "indisponível"
+    return {"generation": generation, "load": load, "status": status}
+
+
+def _merge_operation_data(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
+    """Mescla dados de operação, priorizando séries mais longas do secondary."""
+    merged_gen = dict(primary.get("generation", {}))
+    merged_load = dict(primary.get("load", {}))
+
+    for k, v in secondary.get("generation", {}).items():
+        if k not in merged_gen or len(v.get("serie", [])) > len(merged_gen[k].get("serie", [])):
+            merged_gen[k] = v
+
+    for k, v in secondary.get("load", {}).items():
+        if k not in merged_load or len(v.get("serie", [])) > len(merged_load[k].get("serie", [])):
+            merged_load[k] = v
+
+    status = "disponível" if merged_gen or merged_load else "indisponível"
+    return {"generation": merged_gen, "load": merged_load, "status": status}
+
 # =====================================================================
 # CURTAILMENT RENOVÁVEL (ONS)
 # =====================================================================
@@ -235,11 +465,14 @@ def _compute_curtailment_from_csv(
         if "din_instante" not in df.columns:
             return {"status": "indisponível"}
 
-        df["din_instante"] = pd.to_datetime(df["din_instante"], errors="coerce")
+        df["din_instante"] = _parse_date_series(df["din_instante"])
         df = df.dropna(subset=["din_instante"])
 
         if col_flag_invalido and col_flag_invalido in df.columns:
             df = df[df[col_flag_invalido] == False]
+
+        df[col_estimada] = _normalize_br_numeric_series(df[col_estimada])
+        df[col_verificada] = _normalize_br_numeric_series(df[col_verificada])
 
         df = df[
             (df[col_estimada] > 0) &
@@ -266,6 +499,9 @@ def _compute_curtailment_from_csv(
         return {
             "status": "disponível",
             "curtailment_total_mwh": float(df["curtailment_abs"].sum()),
+            "geracao_disponivel_total_mwh": float(df[col_estimada].sum()),
+            "geracao_realizada_total_mwh": float(df[col_verificada].sum()),
+            "curtailment_pct_total": float(df["curtailment_abs"].sum() / df[col_estimada].sum()) if float(df[col_estimada].sum()) > 0 else None,
             "curtailment_medio_hora": float(serie.mean()) if not serie.empty else 0,
             "curtailment_max_hora": float(serie.max()) if not serie.empty else 0,
             "serie": serie.reset_index().rename(
@@ -296,15 +532,21 @@ def _compute_renewable_curtailment(ons: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     total = 0
+    disponivel_total = 0
     if solar.get("curtailment_total_mwh"):
         total += solar["curtailment_total_mwh"]
+    if solar.get("geracao_disponivel_total_mwh"):
+        disponivel_total += solar["geracao_disponivel_total_mwh"]
     if eolica.get("curtailment_total_mwh"):
         total += eolica["curtailment_total_mwh"]
+    if eolica.get("geracao_disponivel_total_mwh"):
+        disponivel_total += eolica["geracao_disponivel_total_mwh"]
 
     return {
         "solar": solar,
         "eolica": eolica,
         "total_mwh": total,
+        "curtailment_pct_total": float(total / disponivel_total) if disponivel_total > 0 else None,
     }
 # =====================================================================
 # INDICE DE SATURAÇÃO RENOVÁVEL
@@ -326,6 +568,1046 @@ def _compute_isr(
         return None
 
     return renovavel_total / carga_media
+
+
+def _normalize_br_numeric_series(series: pd.Series) -> pd.Series:
+    """Converte números em formato brasileiro/ambíguo para float."""
+    if series.empty:
+        return pd.Series(dtype=float)
+
+    raw = series.astype(str).str.strip()
+
+    has_comma = raw.str.contains(",", regex=False)
+    many_dots = raw.str.count(r"\.") > 1
+
+    parsed = raw.copy()
+
+    # Padrão BR: 1.234,56 -> 1234.56
+    parsed.loc[has_comma] = (
+        parsed.loc[has_comma]
+        .str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False)
+    )
+
+    # Valores com múltiplos pontos: 25.000.000.000 -> 25000000000
+    parsed.loc[~has_comma & many_dots] = parsed.loc[~has_comma & many_dots].str.replace(".", "", regex=False)
+
+    # Notação científica (ex.: 0E-8) já é interpretada por to_numeric e vira 0.0
+    parsed = parsed.str.replace(" ", "", regex=False)
+
+    return pd.to_numeric(parsed, errors="coerce")
+
+
+
+
+def _parse_date_series(series: pd.Series) -> pd.Series:
+    """Parse robusto para datas priorizando padrão brasileiro (dd/mm/aaaa)."""
+    if series is None or series.empty:
+        return pd.Series(dtype="datetime64[ns]")
+
+    raw = series.astype(str).str.strip()
+    out = pd.Series(pd.NaT, index=raw.index, dtype="datetime64[ns]")
+
+    # ISO/ano-primeiro: mantém parsing padrão para evitar inversões.
+    mask_iso = raw.str.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}")
+    if mask_iso.any():
+        out.loc[mask_iso] = pd.to_datetime(raw.loc[mask_iso], errors="coerce")
+
+    # Fontes ONS/CCEE com dia primeiro (dd/mm/aaaa [HH:MM[:SS]]).
+    mask_br = ~mask_iso
+    if mask_br.any():
+        out.loc[mask_br] = pd.to_datetime(raw.loc[mask_br], errors="coerce", dayfirst=True)
+
+    # Fallback final para casos residuais.
+    rem = out.isna()
+    if rem.any():
+        out.loc[rem] = pd.to_datetime(raw.loc[rem], errors="coerce")
+
+    return out
+
+def _to_series(records: List[Dict[str, Any]], value_key: str) -> pd.Series:
+    if not records:
+        return pd.Series(dtype=float)
+
+    try:
+        df = pd.DataFrame(records)
+        if "instante" not in df.columns or value_key not in df.columns:
+            return pd.Series(dtype=float)
+
+        df["instante"] = _parse_date_series(df["instante"])
+        df[value_key] = _normalize_br_numeric_series(df[value_key])
+        df = df.dropna(subset=["instante", value_key]).sort_values("instante")
+        if df.empty:
+            return pd.Series(dtype=float)
+        return _ensure_tz_naive_index(df.set_index("instante")[value_key])
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def _safe_corr(a: pd.Series, b: pd.Series, min_points: int = 24) -> Optional[float]:
+    try:
+        a = _ensure_tz_naive_index(a)
+        b = _ensure_tz_naive_index(b)
+        if a.empty or b.empty:
+            return None
+        df = pd.DataFrame({"a": a, "b": b}).dropna()
+        if len(df) < min_points:
+            return None
+        corr = df["a"].corr(df["b"])
+        if pd.isna(corr):
+            return None
+        return float(corr)
+    except Exception:
+        return None
+
+
+def _ensure_tz_naive_index(series: pd.Series) -> pd.Series:
+    """Padroniza índice temporal para datetime naive e sem duplicatas."""
+    s = series.copy()
+
+    try:
+        # Força índice temporal consistente mesmo com mistura tz-aware/tz-naive
+        idx = pd.to_datetime(s.index, errors="coerce", utc=True)
+        s = s[~idx.isna()]
+        idx = idx[~idx.isna()].tz_localize(None)
+        s.index = idx
+    except Exception:
+        try:
+            if isinstance(s.index, pd.DatetimeIndex) and s.index.tz is not None:
+                s.index = s.index.tz_localize(None)
+        except Exception:
+            pass
+
+    try:
+        if isinstance(s.index, pd.DatetimeIndex) and s.index.has_duplicates:
+            if pd.api.types.is_numeric_dtype(s):
+                s = s.groupby(level=0).mean().sort_index()
+            else:
+                s = s[~s.index.duplicated(keep="last")].sort_index()
+        elif isinstance(s.index, pd.DatetimeIndex):
+            s = s.sort_index()
+    except Exception:
+        pass
+
+    return s
+
+
+def _dataset_file(ds: Dict[str, Any]) -> Optional[str]:
+    file = ds.get("file")
+    if isinstance(file, str):
+        file = file.replace("\\", os.sep)
+    return file
+
+
+def _normalize_submercado_name(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    v = str(value).strip().upper()
+    v = v.replace("/", "").replace("-", "").replace(" ", "")
+
+    mapping = {
+        "1": "SUDESTE",
+        "2": "SUL",
+        "3": "NORDESTE",
+        "4": "NORTE",
+        "N": "NORTE",
+        "NE": "NORDESTE",
+        "SE": "SUDESTE",
+        "SECO": "SUDESTE",
+        "SUDESTECENTROOESTE": "SUDESTE",
+        "SUDESTECENTRO-OESTE": "SUDESTE",
+        "S": "SUL",
+        "NORTE": "NORTE",
+        "NORDESTE": "NORDESTE",
+        "SUDESTE": "SUDESTE",
+        "SUL": "SUL",
+    }
+    return mapping.get(v)
+
+
+def _load_gfom_hourly(ons: Dict[str, Any]) -> pd.DataFrame:
+    frames = []
+    for ds in ons.get("datasets", []):
+        name = ds.get("dataset", "")
+        if not name.startswith("Despacho_GFOM_"):
+            continue
+        file = _dataset_file(ds)
+        if not file or not os.path.exists(file):
+            continue
+        try:
+            df = pd.read_csv(file, sep=None, engine="python")
+            if "din_instante" not in df.columns:
+                continue
+            col_ger = "val_verifgeracao" if "val_verifgeracao" in df.columns else None
+            col_gfom = "val_verifgfom" if "val_verifgfom" in df.columns else None
+            if not col_ger or not col_gfom:
+                continue
+            df["din_instante"] = _parse_date_series(df["din_instante"])
+            df[col_ger] = _normalize_br_numeric_series(df[col_ger])
+            df[col_gfom] = _normalize_br_numeric_series(df[col_gfom])
+            df = df.dropna(subset=["din_instante", col_ger, col_gfom])
+            if df.empty:
+                continue
+            frames.append(df[["din_instante", col_ger, col_gfom]].rename(columns={col_ger: "ger", col_gfom: "gfom"}))
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.DataFrame(columns=["ger", "gfom"])
+
+    all_df = pd.concat(frames, ignore_index=True)
+    return all_df.groupby("din_instante")[["ger", "gfom"]].sum().sort_index()
+
+
+def _load_gfom_hourly_by_submarket(ons: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
+    frames: List[pd.DataFrame] = []
+    for ds in ons.get("datasets", []):
+        name = ds.get("dataset", "")
+        if not name.startswith("Despacho_GFOM_"):
+            continue
+        file = _dataset_file(ds)
+        if not file or not os.path.exists(file):
+            continue
+        try:
+            df = pd.read_csv(file, sep=None, engine="python")
+            if "din_instante" not in df.columns:
+                continue
+            col_sub = "id_subsistema" if "id_subsistema" in df.columns else ("submercado" if "submercado" in df.columns else None)
+            col_ger = "val_verifgeracao" if "val_verifgeracao" in df.columns else None
+            col_gfom = "val_verifgfom" if "val_verifgfom" in df.columns else None
+            if not col_sub or not col_ger or not col_gfom:
+                continue
+
+            df["din_instante"] = _parse_date_series(df["din_instante"])
+            df[col_ger] = _normalize_br_numeric_series(df[col_ger])
+            df[col_gfom] = _normalize_br_numeric_series(df[col_gfom])
+            df["submercado"] = df[col_sub].map(_normalize_submercado_name)
+            df = df.dropna(subset=["din_instante", "submercado", col_ger, col_gfom])
+            if df.empty:
+                continue
+            frames.append(df[["din_instante", "submercado", col_ger, col_gfom]].rename(columns={col_ger: "ger", col_gfom: "gfom"}))
+        except Exception:
+            continue
+
+    if not frames:
+        return {}
+
+    all_df = pd.concat(frames, ignore_index=True)
+    result: Dict[str, pd.DataFrame] = {}
+    for sm, grp in all_df.groupby("submercado"):
+        g = grp.groupby("din_instante")[["ger", "gfom"]].sum().sort_index()
+        result[str(sm)] = g
+    return result
+
+
+def _load_disponibilidade_horaria(ons: Dict[str, Any]) -> pd.Series:
+    frames = []
+    for ds in ons.get("datasets", []):
+        name = ds.get("dataset", "")
+        if not name.startswith("Disponibilidade_Usina_"):
+            continue
+        file = _dataset_file(ds)
+        if not file or not os.path.exists(file):
+            continue
+        try:
+            df = pd.read_csv(file, sep=None, engine="python")
+            if "din_instante" not in df.columns:
+                continue
+            col_val = next((c for c in ["val_dispoperacional", "val_dispsincronizada", "val_potenciainstalada"] if c in df.columns), None)
+            if not col_val:
+                continue
+            df["din_instante"] = _parse_date_series(df["din_instante"])
+            df[col_val] = _normalize_power_to_mw(_normalize_br_numeric_series(df[col_val]))
+            df = df.dropna(subset=["din_instante", col_val])
+            if df.empty:
+                continue
+            frames.append(df[["din_instante", col_val]].rename(columns={col_val: "disp"}))
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.Series(dtype=float)
+    all_df = pd.concat(frames, ignore_index=True)
+    return all_df.groupby("din_instante")["disp"].sum().sort_index()
+
+
+def _load_ear_ena_monthly_by_submercado(ons: Dict[str, Any]) -> Tuple[Dict[str, pd.Series], Dict[str, pd.Series]]:
+    """Consolida EAR e ENA mensais por submercado a partir de múltiplos arquivos anuais ONS."""
+    ear_by_sub: Dict[str, pd.Series] = {}
+    ena_by_sub: Dict[str, pd.Series] = {}
+
+    ear_frames: List[pd.DataFrame] = []
+    for ear_file in _find_ons_csv_all(ons, "EAR_Diario_Subsistema"):
+        try:
+            df = pd.read_csv(ear_file, sep=None, engine="python")
+            col_ts = next((c for c in ["ear_data", "din_instante", "instante"] if c in df.columns), None)
+            col_sub = next((c for c in ["id_subsistema", "nom_subsistema", "submercado"] if c in df.columns), None)
+            col_ear = "ear_verif_subsistema_percentual" if "ear_verif_subsistema_percentual" in df.columns else None
+            if not col_ts or not col_sub or not col_ear:
+                continue
+            df[col_ts] = _parse_date_series(df[col_ts])
+            df[col_ear] = _normalize_br_numeric_series(df[col_ear])
+            df["submercado"] = df[col_sub].map(_normalize_submercado_name)
+            df = df.dropna(subset=[col_ts, col_ear, "submercado"])
+            if df.empty:
+                continue
+            ear_frames.append(df[[col_ts, "submercado", col_ear]].rename(columns={col_ts: "ts", col_ear: "valor"}))
+        except Exception:
+            continue
+
+    if ear_frames:
+        ear_df = pd.concat(ear_frames, ignore_index=True)
+        for sm, grp in ear_df.groupby("submercado"):
+            s = grp.set_index("ts")["valor"]
+            ear_by_sub[str(sm)] = _ensure_tz_naive_index(s).resample("ME").mean().dropna()
+
+    ena_frames: List[pd.DataFrame] = []
+    for ena_file in _find_ons_csv_all(ons, "ENA_Diario_Subsistema"):
+        try:
+            df = pd.read_csv(ena_file, sep=None, engine="python")
+            col_ts = next((c for c in ["ena_data", "din_instante", "instante", "ena_datainicio"] if c in df.columns), None)
+            col_sub = next((c for c in ["id_subsistema", "nom_subsistema", "submercado"] if c in df.columns), None)
+            col_ena = next(
+                (c for c in [
+                    "ena_armazenavel_regiao_mwmed",
+                    "ena_bruta_regiao_mwmed",
+                    "val_enaarmazenavel",
+                    "val_enabruta",
+                ] if c in df.columns),
+                None,
+            )
+            if not col_ts or not col_sub or not col_ena:
+                continue
+            df[col_ts] = _parse_date_series(df[col_ts])
+            df[col_ena] = _normalize_br_numeric_series(df[col_ena])
+            df["submercado"] = df[col_sub].map(_normalize_submercado_name)
+            df = df.dropna(subset=[col_ts, col_ena, "submercado"])
+            if df.empty:
+                continue
+            ena_frames.append(df[[col_ts, "submercado", col_ena]].rename(columns={col_ts: "ts", col_ena: "valor"}))
+        except Exception:
+            continue
+
+    if ena_frames:
+        ena_df = pd.concat(ena_frames, ignore_index=True)
+        for sm, grp in ena_df.groupby("submercado"):
+            s = grp.set_index("ts")["valor"]
+            ena_by_sub[str(sm)] = _ensure_tz_naive_index(s).resample("ME").mean().dropna()
+
+    return ear_by_sub, ena_by_sub
+
+
+def _compute_effective_availability_margin(
+    ons: Dict[str, Any],
+    carga_sin_series: pd.Series
+) -> Dict[str, Any]:
+    if carga_sin_series.empty or carga_sin_series.mean() <= 0:
+        return {"status": "indisponível"}
+
+    file = _find_ons_csv(ons, "Disponibilidade_Usina")
+    if not file or not os.path.exists(file):
+        return {"status": "indisponível"}
+
+    try:
+        df = pd.read_csv(file, sep=None, engine="python")
+
+        col_ts = "din_instante" if "din_instante" in df.columns else None
+        if col_ts is None:
+            return {"status": "indisponível"}
+
+        # Preferência explícita pelas colunas reais do dataset ONS informado.
+        pref_cols = ["val_dispoperacional", "val_dispsincronizada", "val_potenciainstalada"]
+        col_val = next((c for c in pref_cols if c in df.columns), None)
+        if col_val is None:
+            return {"status": "indisponível"}
+
+        df[col_ts] = _parse_date_series(df[col_ts])
+        df[col_val] = _normalize_br_numeric_series(df[col_val])
+        df[col_val] = _normalize_power_to_mw(df[col_val])
+        df = df.dropna(subset=[col_ts, col_val])
+        if df.empty:
+            return {"status": "indisponível"}
+
+        disponibilidade_h = df.groupby(col_ts)[col_val].sum().sort_index()
+        cap_disp_media = float(disponibilidade_h.mean()) if not disponibilidade_h.empty else None
+        carga_media = float(carga_sin_series.mean())
+
+        if cap_disp_media is None or carga_media <= 0:
+            return {"status": "indisponível"}
+
+        margem = (cap_disp_media - carga_media) / carga_media
+
+        return {
+            "status": "disponível",
+            "capacidade_disponivel_efetiva_media": cap_disp_media,
+            "carga_media": carga_media,
+            "margem_estrutural_oferta": float(margem),
+            "coluna_origem": col_val,
+        }
+    except Exception:
+        return {"status": "erro"}
+
+
+def _compute_termica_share_from_gfom(ons: Dict[str, Any]) -> Optional[float]:
+    """Dependência térmica efetiva (%): Geração térmica / Geração total (GFOM)."""
+    file = _find_ons_csv(ons, "Despacho_GFOM")
+    if not file or not os.path.exists(file):
+        return None
+
+    try:
+        df = pd.read_csv(file, sep=None, engine="python")
+        if "din_instante" not in df.columns:
+            return None
+
+        col_ger = "val_verifgeracao" if "val_verifgeracao" in df.columns else "val_proggeracao" if "val_proggeracao" in df.columns else None
+        if col_ger is None:
+            return None
+
+        df["din_instante"] = _parse_date_series(df["din_instante"])
+        df[col_ger] = _normalize_br_numeric_series(df[col_ger])
+        df = df.dropna(subset=["din_instante", col_ger])
+        if df.empty:
+            return None
+
+        total_termica = float(df[col_ger].sum())
+
+        # Aproximação de geração total no horizonte horário com Energia Agora (quando disponível)
+        return total_termica
+    except Exception:
+        return None
+
+
+def _compute_advanced_cross_metrics(
+    ons: Dict[str, Any],
+    operacao: Dict[str, Any],
+    pld_series: pd.Series,
+    pld_series_by_submercado: Optional[Dict[str, pd.Series]],
+    ear_medio: Optional[float],
+    ena_media: Optional[float],
+    pld_medio: Optional[float],
+    curtailment: Dict[str, Any],
+) -> Dict[str, Any]:
+    pld_series = _ensure_tz_naive_index(pld_series)
+    pld_series_by_submercado = {
+        _normalize_submercado_name(k) or str(k): _ensure_tz_naive_index(v)
+        for k, v in (pld_series_by_submercado or {}).items()
+        if isinstance(v, pd.Series)
+    }
+
+    generation = operacao.get("generation", {})
+    load = operacao.get("load", {})
+    step_errors: Dict[str, str] = {}
+
+    carga_sin = _ensure_tz_naive_index(_to_series(load.get("sin", {}).get("serie", []), "carga"))
+
+    solar_key = next((k for k in generation.keys() if "solar" in k.lower()), None)
+    eolica_key = next((k for k in generation.keys() if "eolica" in k.lower()), None)
+    termica_key = next((k for k in generation.keys() if "termica" in k.lower()), None)
+
+    solar = _ensure_tz_naive_index(_to_series(generation.get(solar_key, {}).get("serie", []), "geracao")) if solar_key else pd.Series(dtype=float)
+    eolica = _ensure_tz_naive_index(_to_series(generation.get(eolica_key, {}).get("serie", []), "geracao")) if eolica_key else pd.Series(dtype=float)
+    termica = _ensure_tz_naive_index(_to_series(generation.get(termica_key, {}).get("serie", []), "geracao")) if termica_key else pd.Series(dtype=float)
+
+    total_key = "sin" if "sin" in generation else None
+    geracao_total = _ensure_tz_naive_index(_to_series(generation.get(total_key, {}).get("serie", []), "geracao")) if total_key else pd.Series(dtype=float)
+
+    if geracao_total.empty:
+        sin_parts = [
+            _to_series(v.get("serie", []), "geracao")
+            for k, v in generation.items()
+            if k.startswith("sin_")
+        ]
+        if sin_parts:
+            df_sum = pd.concat(sin_parts, axis=1).fillna(0)
+            geracao_total = _ensure_tz_naive_index(df_sum.sum(axis=1))
+
+    carga_liquida = pd.Series(dtype=float)
+    horas_renovavel_gt_carga_liquida = None
+    if not carga_sin.empty:
+        renovaveis = solar.add(eolica, fill_value=0)
+        carga_liquida = carga_sin.sub(renovaveis, fill_value=np.nan)
+        aligned = pd.DataFrame({"renov": renovaveis, "carga_liquida": carga_liquida}).dropna()
+        if not aligned.empty:
+            horas_renovavel_gt_carga_liquida = int((aligned["renov"] > aligned["carga_liquida"]).sum())
+
+    # IPR e ISR (horário)
+    ipr_medio = None
+    isr_medio = None
+    if not carga_sin.empty:
+        renov = solar.add(eolica, fill_value=0)
+        df_ipr = pd.DataFrame({"renov": renov, "carga": carga_sin}).dropna()
+        df_ipr = df_ipr[df_ipr["carga"] > 0]
+        if not df_ipr.empty:
+            ipr_medio = float((df_ipr["renov"] / df_ipr["carga"]).mean())
+    if not carga_liquida.empty:
+        isr_val = _compute_isr(solar, eolica, carga_liquida)
+        isr_medio = float(isr_val) if isr_val is not None else None
+
+    dependencia_termica_pct = None
+    if not termica.empty and not geracao_total.empty:
+        df_term = pd.DataFrame({"termica": termica, "total": geracao_total}).dropna()
+        df_term = df_term[df_term["total"] > 0]
+        if not df_term.empty:
+            dependencia_termica_pct = float((df_term["termica"].sum() / df_term["total"].sum()) * 100)
+
+    # Fallback para datasets GFOM quando Energia Agora não estiver disponível.
+    if dependencia_termica_pct is None:
+        total_termica_gfom = _compute_termica_share_from_gfom(ons)
+        if total_termica_gfom is not None and not geracao_total.empty and geracao_total.sum() > 0:
+            dependencia_termica_pct = float((total_termica_gfom / float(geracao_total.sum())) * 100)
+
+    margem_oferta = _compute_effective_availability_margin(ons, carga_sin)
+
+    # Capacidade disponível real / margem operativa real / stress operacional
+    capacidade_disp_h = _load_disponibilidade_horaria(ons)
+    margem_operativa_media_mensal = None
+    margem_operativa_p5_mensal = None
+    stress_operacional_medio = None
+    stress_operacional_horario = None
+    tendencia_estrutural_mensal = None
+    if not capacidade_disp_h.empty and not carga_sin.empty:
+        df_cap = pd.DataFrame({"cap": capacidade_disp_h, "carga": carga_sin}).dropna()
+        df_cap = df_cap[df_cap["carga"] > 0]
+        if not df_cap.empty:
+            df_cap["margem"] = (df_cap["cap"] - df_cap["carga"]) / df_cap["carga"]
+            df_cap["stress"] = df_cap["carga"] / df_cap["cap"].replace(0, np.nan)
+            stress_operacional_horario = (
+                df_cap["stress"].dropna().reset_index().rename(columns={"index": "instante", "stress": "valor"}).to_dict("records")
+            )
+            if not df_cap["stress"].dropna().empty:
+                stress_operacional_medio = float(df_cap["stress"].dropna().mean())
+
+            mensal = df_cap.resample("ME").agg({"margem": ["mean", lambda x: x.quantile(0.05)]})
+            mensal.columns = ["margem_media", "margem_p5"]
+            mensal = mensal.dropna(how="all")
+            if not mensal.empty:
+                margem_operativa_media_mensal = {
+                    i.strftime("%Y-%m"): float(v) for i, v in mensal["margem_media"].dropna().items()
+                }
+                margem_operativa_p5_mensal = {
+                    i.strftime("%Y-%m"): float(v) for i, v in mensal["margem_p5"].dropna().items()
+                }
+                tendencia_estrutural_mensal = "alta" if mensal["margem_media"].iloc[-1] > mensal["margem_media"].iloc[0] else "baixa"
+
+    corr_pld_carga_liquida = None
+    rolling_corr_90d = None
+    try:
+        pld_series = _ensure_tz_naive_index(pld_series)
+        carga_liquida = _ensure_tz_naive_index(carga_liquida)
+        corr_pld_carga_liquida = _safe_corr(pld_series, carga_liquida, min_points=24)
+        if not pld_series.empty and not carga_liquida.empty:
+            df_rl = pd.DataFrame({"pld": pld_series, "carga_liquida": carga_liquida}).dropna().sort_index()
+            if len(df_rl) >= 24:
+                rolling = df_rl["pld"].rolling(window=90 * 24, min_periods=24).corr(df_rl["carga_liquida"])
+                if not rolling.dropna().empty:
+                    rolling_corr_90d = float(rolling.dropna().iloc[-1])
+    except Exception as e:
+        step_errors["pld_vs_carga_liquida"] = str(e)
+
+    corr_pld_ear_mensal = None
+    pld_vs_ear_mensal_por_submercado: Dict[str, Optional[float]] = {}
+    pld_vs_ena_mensal_por_submercado: Dict[str, Optional[float]] = {}
+    ear_files = _find_ons_csv_all(ons, "EAR_Diario_Subsistema")
+    if ear_files and not pld_series.empty:
+        try:
+            ear_frames = []
+            for ear_file in ear_files:
+                try:
+                    df_ear = pd.read_csv(ear_file, sep=None, engine="python")
+                    col_ts = "ear_data" if "ear_data" in df_ear.columns else None
+                    col_ear = "ear_verif_subsistema_percentual" if "ear_verif_subsistema_percentual" in df_ear.columns else None
+                    if not col_ts or not col_ear:
+                        continue
+                    df_ear[col_ts] = _parse_date_series(df_ear[col_ts])
+                    df_ear[col_ear] = _normalize_br_numeric_series(df_ear[col_ear])
+                    df_ear = df_ear.dropna(subset=[col_ts, col_ear])
+                    if not df_ear.empty:
+                        ear_frames.append(df_ear[[col_ts, col_ear]])
+                except Exception:
+                    continue
+
+            if ear_frames:
+                df_ear = pd.concat(ear_frames, ignore_index=True).sort_values("ear_data")
+                s_ear = _ensure_tz_naive_index(df_ear.set_index("ear_data")["ear_verif_subsistema_percentual"])
+                ear_m = s_ear.resample("ME").mean()
+                pld_m = _ensure_tz_naive_index(pld_series).resample("ME").mean()
+                corr_pld_ear_mensal = _safe_corr(pld_m, ear_m, min_points=3)
+        except Exception:
+            pass
+
+    ear_media_mensal = None
+    ena_media_mensal = None
+    ear_media_diaria = None
+    ena_media_diaria = None
+    matriz_cenario_mensal: List[Dict[str, Any]] = []
+    matriz_cenario_diaria: List[Dict[str, Any]] = []
+    try:
+        ear_by_sub, ena_by_sub = _load_ear_ena_monthly_by_submercado(ons)
+        for sm, pld_sm in pld_series_by_submercado.items():
+            pld_m_sm = _ensure_tz_naive_index(pld_sm).resample("ME").mean()
+            ear_sm = ear_by_sub.get(sm)
+            ena_sm = ena_by_sub.get(sm)
+            pld_vs_ear_mensal_por_submercado[sm] = _safe_corr(pld_m_sm, ear_sm, min_points=3)
+            pld_vs_ena_mensal_por_submercado[sm] = _safe_corr(pld_m_sm, ena_sm, min_points=3)
+
+        if ear_by_sub:
+            ear_media_mensal = {
+                i.strftime("%Y-%m"): float(v)
+                for i, v in pd.concat(ear_by_sub, axis=1).mean(axis=1, skipna=True).dropna().sort_index().items()
+            }
+        if ena_by_sub:
+            ena_media_mensal = {
+                i.strftime("%Y-%m"): float(v)
+                for i, v in pd.concat(ena_by_sub, axis=1).mean(axis=1, skipna=True).dropna().sort_index().items()
+            }
+
+        # Séries diárias (para consulta horária por dia no dashboard)
+        ear_daily_frames = []
+        for ear_file in _find_ons_csv_all(ons, "EAR_Diario_Subsistema"):
+            try:
+                dfe = pd.read_csv(ear_file, sep=None, engine="python")
+                if "ear_data" in dfe.columns and "ear_verif_subsistema_percentual" in dfe.columns:
+                    dfe["ear_data"] = _parse_date_series(dfe["ear_data"])
+                    dfe["ear_verif_subsistema_percentual"] = _normalize_br_numeric_series(dfe["ear_verif_subsistema_percentual"])
+                    dfe = dfe.dropna(subset=["ear_data", "ear_verif_subsistema_percentual"])
+                    if not dfe.empty:
+                        ear_daily_frames.append(dfe[["ear_data", "ear_verif_subsistema_percentual"]])
+            except Exception:
+                continue
+        if ear_daily_frames:
+            dfe = pd.concat(ear_daily_frames, ignore_index=True)
+            ear_media_diaria = {
+                i.strftime("%Y-%m-%d"): float(v)
+                for i, v in dfe.groupby("ear_data")["ear_verif_subsistema_percentual"].mean().sort_index().items()
+            }
+
+        ena_daily_frames = []
+        ena_candidates = ["ena_armazenavel_regiao_mwmed", "ena_bruta_regiao_mwmed", "val_enaarmazenavel", "val_enabruta"]
+        for ena_file in _find_ons_csv_all(ons, "ENA_Diario_Subsistema"):
+            try:
+                dfn = pd.read_csv(ena_file, sep=None, engine="python")
+                col_ena = next((c for c in ena_candidates if c in dfn.columns), None)
+                if "ena_data" in dfn.columns and col_ena:
+                    dfn["ena_data"] = _parse_date_series(dfn["ena_data"])
+                    dfn[col_ena] = _normalize_br_numeric_series(dfn[col_ena])
+                    dfn = dfn.dropna(subset=["ena_data", col_ena])
+                    if not dfn.empty:
+                        ena_daily_frames.append(dfn[["ena_data", col_ena]].rename(columns={col_ena: "ena_val"}))
+            except Exception:
+                continue
+        if ena_daily_frames:
+            dfn = pd.concat(ena_daily_frames, ignore_index=True)
+            ena_media_diaria = {
+                i.strftime("%Y-%m-%d"): float(v)
+                for i, v in dfn.groupby("ena_data")["ena_val"].mean().sort_index().items()
+            }
+
+        pld_m_global = _ensure_tz_naive_index(pld_series).resample("ME").mean()
+        carga_liquida_m = _ensure_tz_naive_index(carga_liquida).resample("ME").mean() if not carga_liquida.empty else pd.Series(dtype=float)
+        termica_pct_m = (pd.DataFrame({"termica": termica, "total": geracao_total}).dropna().query("total > 0").eval("(termica/total)*100").resample("ME").mean() if (not termica.empty and not geracao_total.empty) else pd.Series(dtype=float))
+
+        idx = pld_m_global.index
+        for extra in [
+            (pd.to_datetime(list((ear_media_mensal or {}).keys()), format="%Y-%m", errors="coerce") + pd.offsets.MonthEnd(0)) if ear_media_mensal else pd.DatetimeIndex([]),
+            (pd.to_datetime(list((ena_media_mensal or {}).keys()), format="%Y-%m", errors="coerce") + pd.offsets.MonthEnd(0)) if ena_media_mensal else pd.DatetimeIndex([]),
+            carga_liquida_m.index if not carga_liquida_m.empty else pd.DatetimeIndex([]),
+            termica_pct_m.index if not termica_pct_m.empty else pd.DatetimeIndex([]),
+        ]:
+            idx = idx.union(extra)
+
+        seen_months = set()
+        for month in sorted([i for i in idx if not pd.isna(i)]):
+            month_label = month.strftime("%Y-%m")
+            if month_label in seen_months:
+                continue
+            seen_months.add(month_label)
+            pld_v = float(pld_m_global.get(month)) if month in pld_m_global.index and pd.notna(pld_m_global.get(month)) else None
+            ear_v = ear_media_mensal.get(month.strftime("%Y-%m")) if ear_media_mensal else None
+            ena_v = ena_media_mensal.get(month.strftime("%Y-%m")) if ena_media_mensal else None
+            carga_v = float(carga_liquida_m.get(month)) if month in carga_liquida_m.index and pd.notna(carga_liquida_m.get(month)) else None
+            term_v = float(termica_pct_m.get(month)) if month in termica_pct_m.index and pd.notna(termica_pct_m.get(month)) else None
+
+            if pld_v is None or ear_v is None:
+                cenario = "dados_insuficientes"
+            elif pld_v >= PLD_TETO_ESTRUTURAL * 0.8 and ear_v < 50:
+                cenario = "estresse_hidrico"
+            elif pld_v <= PLD_PISO * 1.2 and ear_v > 65:
+                cenario = "abundancia_hidrica"
+            elif term_v is not None and term_v > 25 and pld_medio is not None and pld_v > pld_medio:
+                cenario = "pressao_termica"
+            else:
+                cenario = "equilibrio_operacional"
+
+            matriz_cenario_mensal.append({
+                "mes": month_label,
+                "pld_medio": pld_v,
+                "ear_medio": ear_v,
+                "ena_media": ena_v,
+                "carga_liquida_media": carga_v,
+                "percentual_termica_medio": term_v,
+                "cenario": cenario,
+            })
+    except Exception as e:
+        step_errors["ear_ena_vs_pld_por_submercado"] = str(e)
+
+    percentual_termica_h = pd.Series(dtype=float)
+    if not termica.empty and not geracao_total.empty:
+        df_pctt = pd.DataFrame({"termica": termica, "total": geracao_total}).dropna()
+        df_pctt = df_pctt[df_pctt["total"] > 0]
+        if not df_pctt.empty:
+            percentual_termica_h = (df_pctt["termica"] / df_pctt["total"]) * 100
+
+    corr_pld_pct_termica = _safe_corr(pld_series, percentual_termica_h, min_points=24)
+
+    sigma_pld_intradiario = None
+    sigma_carga_intradiario = None
+    sigma_eolica_intradiario = None
+    if not pld_series.empty:
+        s = pld_series.groupby(pld_series.index.floor("D")).std().dropna()
+        if not s.empty:
+            sigma_pld_intradiario = float(s.mean())
+    if not carga_sin.empty:
+        s = carga_sin.groupby(carga_sin.index.floor("D")).std().dropna()
+        if not s.empty:
+            sigma_carga_intradiario = float(s.mean())
+    if not eolica.empty:
+        s = eolica.groupby(eolica.index.floor("D")).std().dropna()
+        if not s.empty:
+            sigma_eolica_intradiario = float(s.mean())
+
+    amplificacao_numerica = None
+    if sigma_pld_intradiario is not None:
+        base = np.nanmean([v for v in [sigma_carga_intradiario, sigma_eolica_intradiario] if v is not None])
+        if not np.isnan(base) and base > 0:
+            amplificacao_numerica = bool(sigma_pld_intradiario > (2 * base))
+
+    corr_curtail_ear = None
+    classificacao_curtail_ear = "indisponível"
+    if ear_medio is not None:
+        if ear_medio > 70 and curtailment.get("total_mwh", 0) > 0:
+            classificacao_curtail_ear = "estrutural"
+        elif ear_medio < 50 and curtailment.get("total_mwh", 0) > 0:
+            classificacao_curtail_ear = "restricao_local"
+        else:
+            classificacao_curtail_ear = "indeterminado"
+
+    intercambio_classificacao = "indisponível"
+    intercambio_saturado = None
+    try:
+        intercambio_series = pd.Series(dtype=float)
+        limite_series = pd.Series(dtype=float)
+        for ds in ons.get("datasets", []):
+            name = ds.get("dataset", "").lower()
+            file = ds.get("file")
+            if "intercambio" not in name or not file or not os.path.exists(file):
+                continue
+            df_i = pd.read_csv(file)
+            if "instante" in df_i.columns and "intercambio" in df_i.columns:
+                df_i["instante"] = _parse_date_series(df_i["instante"])
+                df_i["intercambio"] = _normalize_br_numeric_series(df_i["intercambio"])
+                s_i = df_i.dropna(subset=["instante", "intercambio"]).set_index("instante")["intercambio"]
+                intercambio_series = s_i if intercambio_series.empty else intercambio_series.add(s_i, fill_value=0)
+            if "instante" in df_i.columns and "limite" in df_i.columns:
+                df_i["instante"] = _parse_date_series(df_i["instante"])
+                df_i["limite"] = _normalize_br_numeric_series(df_i["limite"])
+                s_l = df_i.dropna(subset=["instante", "limite"]).set_index("instante")["limite"]
+                limite_series = s_l if limite_series.empty else limite_series.add(s_l, fill_value=0)
+
+        if not intercambio_series.empty and not limite_series.empty and curtailment.get("total_mwh", 0) > 0:
+            df_x = pd.DataFrame({"interc": intercambio_series.abs(), "lim": limite_series.abs()}).dropna()
+            if not df_x.empty:
+                sat = (df_x["interc"] >= (0.95 * df_x["lim"]))
+                intercambio_saturado = bool(sat.any())
+                intercambio_classificacao = "transmissao" if sat.any() else "estrutural"
+    except Exception:
+        intercambio_classificacao = "indisponível"
+
+    regime_abundancia = None
+    if (
+        dependencia_termica_pct is not None and ear_medio is not None and pld_medio is not None
+    ):
+        regime_abundancia = bool(dependencia_termica_pct < 15 and ear_medio > 70 and pld_medio <= PLD_PISO * 1.15)
+
+    # GFOM x PLD
+    gfom_h = _load_gfom_hourly(ons)
+    gfom_pct = None
+    gfom_pld_corr = None
+    gfom_pld_cenario = "indisponível"
+    gfom_alto_pld_baixo = None
+    gfom_alto_pld_alto = None
+    if not gfom_h.empty:
+        try:
+            gfom_h = gfom_h.copy()
+            gfom_h.index = pd.to_datetime(gfom_h.index, errors="coerce", utc=True).tz_localize(None)
+            gfom_h = gfom_h[~gfom_h.index.isna()]
+            gfom_h = gfom_h.groupby(level=0).sum().sort_index()
+
+            total_ger = float(gfom_h["ger"].sum()) if "ger" in gfom_h else 0
+            total_gfom = float(gfom_h["gfom"].sum()) if "gfom" in gfom_h else 0
+            if total_ger > 0:
+                gfom_pct = float((total_gfom / total_ger) * 100)
+
+            if not pld_series.empty:
+                gfom_pct_h = (gfom_h["gfom"] / gfom_h["ger"].replace(0, np.nan)) * 100
+                gfom_pct_h = _ensure_tz_naive_index(gfom_pct_h.replace([np.inf, -np.inf], np.nan))
+                gfom_pld_corr = _safe_corr(pld_series, gfom_pct_h, min_points=24)
+
+                df_gp = pd.DataFrame({"pld": pld_series, "gfom_pct": gfom_pct_h}).dropna()
+                if not df_gp.empty:
+                    pld_low = df_gp["pld"].quantile(0.2)
+                    pld_high = df_gp["pld"].quantile(0.8)
+                    gfom_high = df_gp["gfom_pct"].quantile(0.8)
+                    gfom_low = df_gp["gfom_pct"].quantile(0.2)
+                    gfom_alto_pld_baixo = int(((df_gp["pld"] <= pld_low) & (df_gp["gfom_pct"] >= gfom_high)).sum())
+                    gfom_alto_pld_alto = int(((df_gp["pld"] >= pld_high) & (df_gp["gfom_pct"] <= gfom_low)).sum())
+                    if gfom_alto_pld_baixo > gfom_alto_pld_alto:
+                        gfom_pld_cenario = "A: PLD baixo + GFOM alto"
+                    else:
+                        gfom_pld_cenario = "B: PLD alto + GFOM baixo"
+        except Exception as e:
+            step_errors["gfom_vs_pld"] = str(e)
+
+    # GFOM x PLD por submercado (PLD horário pode diferir por submercado)
+    gfom_vs_pld_por_submercado: Dict[str, Any] = {}
+    gfom_sub = _load_gfom_hourly_by_submarket(ons)
+    sm_suffix = {
+        "NORTE": "n",
+        "NORDESTE": "ne",
+        "SUL": "s",
+        "SUDESTE": "se",
+    }
+    for sm, gfdf in gfom_sub.items():
+        try:
+            pld_sm = pld_series_by_submercado.get(sm)
+            if pld_sm is None or pld_sm.empty:
+                continue
+            gfdf = gfdf.copy()
+            gfdf.index = pd.to_datetime(gfdf.index, errors="coerce", utc=True).tz_localize(None)
+            gfdf = gfdf[~gfdf.index.isna()].groupby(level=0).sum().sort_index()
+            gfom_pct_sm = (gfdf["gfom"] / gfdf["ger"].replace(0, np.nan) * 100).replace([np.inf, -np.inf], np.nan)
+            gfom_pct_sm = _ensure_tz_naive_index(gfom_pct_sm)
+            key_pct = f"gfom_{sm_suffix.get(sm, sm.lower())}_pct"
+            gfom_vs_pld_por_submercado[sm] = {
+                key_pct: float((gfdf["gfom"].sum() / gfdf["ger"].sum()) * 100) if gfdf["ger"].sum() > 0 else None,
+                "corr": _safe_corr(pld_sm, gfom_pct_sm, min_points=24),
+            }
+        except Exception as e:
+            gfom_vs_pld_por_submercado[sm] = {"erro": str(e)}
+
+    # Curtailement estrutural vs elétrico (nova abordagem)
+    curtailment_class_nova = "indisponível"
+    if curtailment.get("total_mwh", 0) > 0:
+        if intercambio_saturado:
+            curtailment_class_nova = "eletrico"
+        elif ipr_medio is not None and ipr_medio > 1 and ear_medio is not None and ear_medio > 60 and pld_medio is not None and pld_medio <= PLD_PISO * 1.1:
+            curtailment_class_nova = "estrutural"
+        else:
+            curtailment_class_nova = "operacional"
+
+    # Matriz diária para uso no dashboard (cards c1..c7 por período)
+    try:
+        pld_h = _ensure_tz_naive_index(pld_series)
+        pld_d = pld_h.groupby(pld_h.index.floor("D")).mean() if not pld_h.empty else pd.Series(dtype=float)
+
+        gfom_pct_d = pd.Series(dtype=float)
+        if not gfom_h.empty:
+            gtmp = gfom_h.copy()
+            gtmp.index = pd.to_datetime(gtmp.index, errors="coerce", utc=True).tz_localize(None)
+            gtmp = gtmp[~gtmp.index.isna()].groupby(level=0).sum().sort_index()
+            if not gtmp.empty:
+                gtmp_d = gtmp.groupby(gtmp.index.floor("D")).sum()
+                gfom_pct_d = (gtmp_d["gfom"] / gtmp_d["ger"].replace(0, np.nan) * 100).replace([np.inf, -np.inf], np.nan)
+
+        gfom_corr_d = pd.Series(dtype=float)
+        if not pld_h.empty and not gfom_h.empty:
+            gtmp = gfom_h.copy()
+            gtmp.index = pd.to_datetime(gtmp.index, errors="coerce", utc=True).tz_localize(None)
+            gtmp = gtmp[~gtmp.index.isna()].groupby(level=0).sum().sort_index()
+            gfom_pct_h_local = (gtmp["gfom"] / gtmp["ger"].replace(0, np.nan) * 100).replace([np.inf, -np.inf], np.nan)
+            df_gp_h = pd.DataFrame({"pld": pld_h, "gfom_pct": gfom_pct_h_local}).dropna()
+            if not df_gp_h.empty:
+                vals = {}
+                for d, grp in df_gp_h.groupby(df_gp_h.index.floor("D")):
+                    vals[d] = _safe_corr(grp["pld"], grp["gfom_pct"], min_points=12)
+                gfom_corr_d = pd.Series(vals)
+
+        stress_d = pd.Series(dtype=float)
+        if not capacidade_disp_h.empty and not carga_sin.empty:
+            df_capd = pd.DataFrame({"cap": capacidade_disp_h, "carga": carga_sin}).dropna()
+            df_capd = df_capd[df_capd["cap"] > 0]
+            if not df_capd.empty:
+                stress_d = (df_capd["carga"] / df_capd["cap"]).groupby(df_capd.index.floor("D")).mean()
+
+        ipr_d = pd.Series(dtype=float)
+        if not carga_sin.empty:
+            renov_dfr = pd.DataFrame({"renov": solar.add(eolica, fill_value=0), "carga": carga_sin}).dropna()
+            renov_dfr = renov_dfr[renov_dfr["carga"] > 0]
+            if not renov_dfr.empty:
+                ipr_d = (renov_dfr["renov"] / renov_dfr["carga"]).groupby(renov_dfr.index.floor("D")).mean()
+
+        isr_d = pd.Series(dtype=float)
+        if not carga_liquida.empty:
+            df_isrd = pd.DataFrame({"renov": solar.add(eolica, fill_value=0), "carga_liquida": carga_liquida}).dropna()
+            df_isrd = df_isrd[df_isrd["carga_liquida"] > 0]
+            if not df_isrd.empty:
+                isr_d = (df_isrd["renov"] / df_isrd["carga_liquida"]).groupby(df_isrd.index.floor("D")).mean()
+
+        term_dep_d = pd.Series(dtype=float)
+        if not termica.empty and not geracao_total.empty:
+            dft = pd.DataFrame({"term": termica, "tot": geracao_total}).dropna()
+            dft = dft[dft["tot"] > 0]
+            if not dft.empty:
+                term_dep_d = ((dft["term"] / dft["tot"]) * 100).groupby(dft.index.floor("D")).mean()
+
+        curtailment_d = pd.Series(dtype=float)
+        try:
+            sol_rec = ((curtailment.get("solar") or {}).get("serie") or [])
+            eol_rec = ((curtailment.get("eolica") or {}).get("serie") or [])
+            s_sol = _to_series(sol_rec, "valor") if sol_rec else pd.Series(dtype=float)
+            s_eol = _to_series(eol_rec, "valor") if eol_rec else pd.Series(dtype=float)
+            if not s_sol.empty or not s_eol.empty:
+                curtailment_d = s_sol.add(s_eol, fill_value=0).groupby(lambda x: pd.Timestamp(x).floor("D")).sum()
+        except Exception:
+            curtailment_d = pd.Series(dtype=float)
+
+        ear_daily = pd.Series({pd.to_datetime(k): v for k, v in (ear_media_diaria or {}).items()}) if ear_media_diaria else pd.Series(dtype=float)
+
+        idx_days = pd.DatetimeIndex([])
+        for ser in [pld_d, gfom_pct_d, gfom_corr_d, stress_d, ipr_d, isr_d, term_dep_d, curtailment_d, ear_daily]:
+            if not ser.empty:
+                idx_days = idx_days.union(pd.DatetimeIndex(ser.index))
+
+        for d in sorted(idx_days):
+            pldv = pld_d.get(d)
+            gpv = gfom_pct_d.get(d)
+            gcv = gfom_corr_d.get(d)
+            stv = stress_d.get(d)
+            ipv = ipr_d.get(d)
+            isv = isr_d.get(d)
+            tdv = term_dep_d.get(d)
+            ctv = curtailment_d.get(d)
+            earv = ear_daily.get(d)
+
+            if ctv is None or pd.isna(ctv) or ctv <= 0:
+                curt_state = "inexistente"
+            elif intercambio_saturado:
+                curt_state = "eletrico"
+            elif (ipv is not None and not pd.isna(ipv) and ipv > 1) and (earv is not None and not pd.isna(earv) and earv > 60) and (pldv is not None and not pd.isna(pldv) and pldv <= PLD_PISO * 1.1):
+                curt_state = "estrutural"
+            else:
+                curt_state = "operacional"
+
+            abund = None
+            if tdv is not None and not pd.isna(tdv) and earv is not None and not pd.isna(earv) and pldv is not None and not pd.isna(pldv):
+                abund = bool(tdv < 15 and earv > 70 and pldv <= PLD_PISO * 1.15)
+
+            matriz_cenario_diaria.append({
+                "dia": pd.Timestamp(d).strftime("%Y-%m-%d"),
+                "gfom_pct": None if pd.isna(gpv) else float(gpv),
+                "gfom_vs_pld_corr": None if pd.isna(gcv) else float(gcv),
+                "curtailment_estado": curt_state,
+                "stress_operacional_medio": None if pd.isna(stv) else float(stv),
+                "ipr_medio": None if pd.isna(ipv) else float(ipv),
+                "isr_medio": None if pd.isna(isv) else float(isv),
+                "regime_abundancia": abund,
+                "pld_medio_dia": None if pd.isna(pldv) else float(pldv),
+                "ear_medio_dia": None if pd.isna(earv) else float(earv),
+            })
+    except Exception as e:
+        step_errors["matriz_cenario_diaria"] = str(e)
+
+    # Mudança de regime histórica (trimestral)
+    mudanca_regime_trimestral = {}
+    try:
+        capacidade_disp_h = _ensure_tz_naive_index(capacidade_disp_h)
+        carga_sin = _ensure_tz_naive_index(carga_sin)
+        if not pld_series.empty and not capacidade_disp_h.empty and not carga_sin.empty:
+            df_reg = pd.DataFrame({"pld": pld_series, "cap": capacidade_disp_h, "carga": carga_sin}).dropna()
+            if not df_reg.empty:
+                df_reg["stress"] = df_reg["carga"] / df_reg["cap"].replace(0, np.nan)
+                g = df_reg.groupby(df_reg.index.to_period("Q")).agg({"pld": "mean", "stress": "mean"}).dropna()
+                for q, row in g.iterrows():
+                    if row["stress"] < 0.8 and row["pld"] > pld_series.quantile(0.7):
+                        reg = "desalinhamento_estrutural"
+                    elif row["stress"] > 1:
+                        reg = "estresse_operacional"
+                    else:
+                        reg = "equilibrio"
+                    mudanca_regime_trimestral[str(q)] = reg
+    except Exception as e:
+        step_errors["mudanca_regime_historica_trimestral"] = str(e)
+
+    return {
+        "status": "parcial" if step_errors else "disponível",
+        "diagnostico_etapas": step_errors,
+        "margem_estrutural_oferta": margem_oferta,
+        "dependencia_termica_efetiva_pct": dependencia_termica_pct,
+        "regime_abundancia": regime_abundancia,
+        "ena_media": ena_media,
+        "ear_media_mensal": ear_media_mensal,
+        "ena_media_mensal": ena_media_mensal,
+        "ear_media_diaria": ear_media_diaria,
+        "ena_media_diaria": ena_media_diaria,
+        "matriz_cenario_mensal": matriz_cenario_mensal,
+        "matriz_cenario_diaria": matriz_cenario_diaria,
+        "horas_renovavel_gt_carga_liquida": horas_renovavel_gt_carga_liquida,
+        "curtailment_percentual_total": curtailment.get("curtailment_pct_total"),
+        "correlacoes": {
+            "curtailment_vs_ear": corr_curtail_ear,
+            "pld_vs_carga_liquida": corr_pld_carga_liquida,
+            "pld_vs_carga_liquida_rolling_90d": rolling_corr_90d,
+            "pld_vs_ear_mensal": corr_pld_ear_mensal,
+            "pld_vs_percentual_termica": corr_pld_pct_termica,
+            "pld_vs_ear_mensal_por_submercado": pld_vs_ear_mensal_por_submercado,
+            "pld_vs_ena_mensal_por_submercado": pld_vs_ena_mensal_por_submercado,
+        },
+        "classificacoes": {
+            "curtailment_x_ear": classificacao_curtail_ear,
+            "curtailment_x_intercambio": intercambio_classificacao,
+            "curtailment_estrutural_vs_eletrico": curtailment_class_nova,
+        },
+        "metodologia": {
+            "gfom_vs_pld": "GFOM% horário = (val_verifgfom / val_verifgeracao)*100; correlação de Pearson com PLD horário após alinhamento temporal.",
+            "margem_operativa_real": "margem = (capacidade_disponivel_real - carga)/carga; margem média mensal = média da margem horária no mês; margem p5 = percentil 5% da margem horária no mês.",
+            "curtailment": "elétrico quando intercâmbio saturado (>=95% do limite) com curtailment>0; estrutural quando IPR>1, EAR>60 e PLD baixo; caso contrário operacional.",
+            "ipr_isr": "IPR = média((solar+eólica)/carga); ISR = média((solar+eólica)/carga_liquida).",
+            "regime_abundancia": "True quando dependência térmica <15%, EAR>70 e PLD <= 1.15*piso regulatório.",
+            "mudanca_regime_trimestral": "desalinhamento_estrutural: stress<0.8 e PLD no quantil alto; estresse_operacional: stress>1; senão equilíbrio.",
+        },
+        "volatilidade_intradiaria": {
+            "sigma_pld": sigma_pld_intradiario,
+            "sigma_carga": sigma_carga_intradiario,
+            "sigma_eolica": sigma_eolica_intradiario,
+            "hipotese_amplificacao_numerica": amplificacao_numerica,
+        },
+        "aderencia_fisico_economica": {
+            "pld_vs_carga_liquida": corr_pld_carga_liquida,
+            "pld_vs_ear_mensal": corr_pld_ear_mensal,
+            "pld_vs_percentual_termica": corr_pld_pct_termica,
+            "pld_vs_ear_mensal_por_submercado": pld_vs_ear_mensal_por_submercado,
+            "pld_vs_ena_mensal_por_submercado": pld_vs_ena_mensal_por_submercado,
+            "gfom_pct": gfom_pct,
+            "gfom_vs_pld_corr": gfom_pld_corr,
+            "gfom_vs_pld_cenario": gfom_pld_cenario,
+            "horas_cenario_A": gfom_alto_pld_baixo,
+            "horas_cenario_B": gfom_alto_pld_alto,
+            "gfom_vs_pld_por_submercado": gfom_vs_pld_por_submercado,
+        },
+        "capacidade_operativa_real": {
+            "capacidade_disponivel_real_media_mw": float(capacidade_disp_h.mean()) if not capacidade_disp_h.empty else None,
+            "margem_operativa_media_mensal": margem_operativa_media_mensal,
+            "margem_operativa_p5_mensal": margem_operativa_p5_mensal,
+            "stress_operacional_medio": stress_operacional_medio,
+            "stress_operacional_horario": stress_operacional_horario,
+            "tendencia_estrutural_mensal": tendencia_estrutural_mensal,
+        },
+        "indices_renovaveis": {
+            "ipr_medio": ipr_medio,
+            "isr_medio": isr_medio,
+        },
+        "mudanca_regime_historica_trimestral": mudanca_regime_trimestral,
+    }
+
 
 def _classificar_curtailment(
     curtailment_total: float,
@@ -356,6 +1638,10 @@ def compute_mcp_economico(
     geracao_hidraulica: pd.Series,
     cvu_medio: Optional[float]
 ) -> Dict[str, Any]:
+
+    pld_series = _ensure_tz_naive_index(pld_series)
+    carga_series = _ensure_tz_naive_index(carga_series)
+    geracao_hidraulica = _ensure_tz_naive_index(geracao_hidraulica)
 
     if pld_series.empty or carga_series.empty:
         return {"status": "indisponível"}
@@ -758,22 +2044,96 @@ def calcular_indicadores_termicos_revisados(
     }
 
 
+def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
+    """Retorna série semanal média de CVU por dat_fimsemana (consolidando múltiplos arquivos)."""
+    files = _find_ons_csv_all(ons, "CVU_Usina_Termica")
+    if not files:
+        return pd.Series(dtype=float)
+
+    frames: List[pd.DataFrame] = []
+    for cvu_file in files:
+        try:
+            df = pd.read_csv(cvu_file, sep=None, engine="python")
+            needed = {"dat_iniciosemana", "dat_fimsemana", "val_cvu"}
+            if not needed.issubset(df.columns):
+                continue
+            df = df[["dat_iniciosemana", "dat_fimsemana", "val_cvu"]].copy()
+            df["dat_iniciosemana"] = _parse_date_series(df["dat_iniciosemana"])
+            df["dat_fimsemana"] = _parse_date_series(df["dat_fimsemana"])
+            df["val_cvu"] = _normalize_br_numeric_series(df["val_cvu"])
+            df = df.dropna(subset=["dat_iniciosemana", "dat_fimsemana", "val_cvu"])
+            df = df[df["val_cvu"] > 0]
+            if not df.empty:
+                frames.append(df)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.Series(dtype=float)
+
+    all_df = pd.concat(frames, ignore_index=True)
+    weekly = (
+        all_df.groupby(["dat_iniciosemana", "dat_fimsemana"], as_index=False)["val_cvu"]
+        .mean()
+        .sort_values("dat_fimsemana")
+    )
+    if weekly.empty:
+        return pd.Series(dtype=float)
+    return weekly.set_index("dat_fimsemana")["val_cvu"].astype(float)
+
+
+def _expand_cvu_weekly_to_daily(ons: Dict[str, Any]) -> pd.Series:
+    """Expande CVU semanal para valor diário no intervalo dat_iniciosemana..dat_fimsemana."""
+    files = _find_ons_csv_all(ons, "CVU_Usina_Termica")
+    if not files:
+        return pd.Series(dtype=float)
+
+    frames: List[pd.DataFrame] = []
+    for cvu_file in files:
+        try:
+            df = pd.read_csv(cvu_file, sep=None, engine="python")
+            needed = {"dat_iniciosemana", "dat_fimsemana", "val_cvu"}
+            if not needed.issubset(df.columns):
+                continue
+            df = df[["dat_iniciosemana", "dat_fimsemana", "val_cvu"]].copy()
+            df["dat_iniciosemana"] = _parse_date_series(df["dat_iniciosemana"])
+            df["dat_fimsemana"] = _parse_date_series(df["dat_fimsemana"])
+            df["val_cvu"] = _normalize_br_numeric_series(df["val_cvu"])
+            df = df.dropna(subset=["dat_iniciosemana", "dat_fimsemana", "val_cvu"])
+            df = df[df["val_cvu"] > 0]
+            if not df.empty:
+                frames.append(df)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.Series(dtype=float)
+
+    wk = (
+        pd.concat(frames, ignore_index=True)
+        .groupby(["dat_iniciosemana", "dat_fimsemana"], as_index=False)["val_cvu"]
+        .mean()
+    )
+    daily_vals: Dict[pd.Timestamp, float] = {}
+    for _, r in wk.iterrows():
+        start = pd.Timestamp(r["dat_iniciosemana"]).floor("D")
+        end = pd.Timestamp(r["dat_fimsemana"]).floor("D")
+        if end < start:
+            start, end = end, start
+        for d in pd.date_range(start, end, freq="D"):
+            daily_vals[d] = float(r["val_cvu"])
+
+    if not daily_vals:
+        return pd.Series(dtype=float)
+    return pd.Series(daily_vals).sort_index()
+
+
 def _compute_cvu_from_csv(ons: Dict[str, Any]) -> Optional[float]:
-    cvu_file = _find_ons_csv(ons, "CVU_Usina_Termica")
-
-    if not cvu_file or not os.path.exists(cvu_file):
+    s = _load_cvu_weekly_series(ons)
+    if s.empty:
         return None
-
     try:
-        df = pd.read_csv(cvu_file, sep=None, engine="python")
-        if "val_cvu" not in df.columns:
-            return None
-
-        cvus = df["val_cvu"].dropna()
-        cvus = cvus[cvus > 0]
-
-        return float(cvus.mean()) if not cvus.empty else None
-
+        return float(s.iloc[-1])
     except Exception:
         return None
 
@@ -918,23 +2278,55 @@ def classify_sin_cycle(
 # Core builder
 # =====================================================================
 
+def _core_log(stage: str, message: str, **context: Any) -> None:
+    ts = datetime.now().isoformat()
+    ctx = " | ".join(f"{k}={v}" for k, v in context.items())
+    line = f"[{ts}] [build_core_analysis] [{stage}] {message}"
+    if ctx:
+        line = f"{line} | {ctx}"
+
+    # stdout imediato (útil no terminal/powershell)
+    print(line, flush=True)
+
+    # persistência em arquivo para diagnóstico quando stdout não aparece
+    try:
+        log_path = os.environ.get("KINTUADI_CORE_LOG_PATH", os.path.join("data", "core_analysis_debug.log"))
+        log_dir = os.path.dirname(log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write(line + "\n")
+    except Exception:
+        # logging não pode quebrar o pipeline principal
+        pass
+
+
 def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> Dict[str, Any]:
-    print("Entrou no build_core_analysis")
+    _core_log("START", "Entrou no build_core_analysis", output_dir=output_dir)
     sources = _extract_sources(raw_data)
     ons = sources["ons"]
     ccee = sources["ccee"]
 
     # ---------------- Hidrologia ----------------
+    _core_log("HIDRO", "Iniciando cálculo de hidrologia")
     hydrology = _compute_hydrology_from_csv(ons)
+    _core_log("HIDRO", "Hidrologia calculada", ear_medio=hydrology.get("ear_medio"), ena_media=hydrology.get("ena_media"))
 
     # ---------------- Operação ONS ----------------
-    operacao = _extract_energia_agora(ons)
+    # Energia Agora (intradiário) + Open Data histórico (séries longas)
+    _core_log("OPERACAO", "Extraindo operação Energia Agora")
+    operacao_agora = _extract_energia_agora(ons)
+    _core_log("OPERACAO", "Extraindo operação histórica Open Data")
+    operacao_historica = _extract_open_data_historical_operation(ons)
+    operacao = _merge_operation_data(operacao_agora, operacao_historica)
+    _core_log("OPERACAO", "Operação consolidada")
 
     # ---------------- Preços (PLD horário CCEE) ----------------
     pld_medio = pld_std = pld_min = pld_max = None
     pld_por_submercado = {}
     pld_serie_7d = {}
     pld_series_full = pd.Series(dtype=float)
+    pld_series_by_submercado: Dict[str, pd.Series] = {}
 
     # --------------------------------------------
     # 🔎 Consolidar PLD histórico multi-ano (2021–2026)
@@ -962,6 +2354,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     # 📊 Processamento consolidado
     # --------------------------------------------
     df_pld = pd.DataFrame(pld_records)
+    _core_log("PLD", "Registros PLD consolidados", total_registros=len(pld_records), dataframe_vazio=df_pld.empty)
 
     ccee_structured = {"metadata": {}, "data": []}
 
@@ -1009,12 +2402,16 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
             pld_min = df_pld["pld_hora"].min()
             pld_max = df_pld["pld_hora"].max()
 
-            pld_series_full = df_pld.set_index("timestamp")["pld_hora"]
+            pld_series_full = _ensure_tz_naive_index(df_pld.set_index("timestamp")["pld_hora"])
 
             # Submercados
             if "submercado" in df_pld.columns:
                 for sub, grp in df_pld.groupby("submercado"):
                     pld_por_submercado[sub] = grp["pld_hora"].mean()
+                    sm = _normalize_submercado_name(sub) or str(sub)
+                    pld_series_by_submercado[sm] = _ensure_tz_naive_index(
+                        grp.sort_values("timestamp").set_index("timestamp")["pld_hora"]
+                    )
 
             # Últimos 7 dias
             last_ts = df_pld["timestamp"].max()
@@ -1069,7 +2466,9 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
             }
 
     # ---------------- Curtailment Renovável ----------------
+    _core_log("CURTAILMENT", "Iniciando cálculo de curtailment renovável")
     curtailment = _compute_renewable_curtailment(ons)
+    _core_log("CURTAILMENT", "Curtailment calculado", total_mwh=curtailment.get("total_mwh"))
 
     classificacao_curtailment = _classificar_curtailment(
         curtailment_total=curtailment.get("total_mwh", 0),
@@ -1083,7 +2482,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     geracao_hidro_sin_series = pd.Series(dtype=float)
 
     if pld_records and not df_pld.empty:
-        pld_series = (
+        pld_series = _ensure_tz_naive_index(
             df_pld
             .sort_values("timestamp")
             .set_index("timestamp")["pld_hora"]
@@ -1107,9 +2506,12 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
         )
 
     # ---------------- Despacho térmico ----------------
+    cvu_semanal = _load_cvu_weekly_series(ons)
+    cvu_diario = _expand_cvu_weekly_to_daily(ons)
     cvu_medio = _compute_cvu_from_csv(ons)
     
     # Calcular indicadores térmicos REVISADOS (v5)
+    _core_log("TERMICA", "Calculando indicadores térmicos revisados")
     indicadores_termicos = calcular_indicadores_termicos_revisados(
         pld_medio=pld_medio,
         cvu_medio=cvu_medio,
@@ -1117,6 +2519,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     )
 
     # ---------------- MCP Econômico ----------------
+    _core_log("MCP", "Calculando MCP econômico")
     mcp_economico = compute_mcp_economico(
         pld_series=pld_series,
         carga_series=carga_sin_series,
@@ -1125,6 +2528,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     )
     
     # ---------------- Ciclo do SIN ----------------
+    _core_log("SIN_CYCLE", "Classificando ciclo do SIN")
     sin_cycle = classify_sin_cycle(
         ear_medio=hydrology.get("ear_medio"),
         ena_media=hydrology.get("ena_media"),
@@ -1142,6 +2546,28 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     
     # Análise de tendência
     tendencia_pld = _analisar_tendencia_pld(pld_series_full)
+
+    # ---------------- Métricas avançadas solicitadas ----------------
+    _core_log("ADVANCED", "Calculando métricas avançadas")
+    try:
+        metricas_avancadas = _compute_advanced_cross_metrics(
+            ons=ons,
+            operacao=operacao,
+            pld_series=pld_series_full,
+            pld_series_by_submercado=pld_series_by_submercado,
+            ear_medio=hydrology.get("ear_medio"),
+            ena_media=hydrology.get("ena_media"),
+            pld_medio=pld_medio,
+            curtailment=curtailment,
+        )
+    except Exception as e:
+        _core_log("ADVANCED", "Erro ao calcular métricas avançadas", erro=str(e))
+        metricas_avancadas = {
+            "status": "erro",
+            "erro": str(e),
+            "correlacoes": {},
+            "classificacoes": {},
+        }
     
     # ---------------- Alerts (ATUALIZADOS com nova lógica) ----------------
     alerts: List[str] = []
@@ -1206,7 +2632,8 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
             "pld_horario_7d": pld_serie_7d,
         },
         # ESTRUTURA REVISADA: Análise térmica com dupla perspectiva
-        "thermal_analysis": indicadores_termicos,
+        "thermal_analysis": {**indicadores_termicos, "cvu_semanal": {d.strftime("%Y-%m-%d"): float(v) for d, v in cvu_semanal.items()} if not cvu_semanal.empty else {}, "cvu_diario": {d.strftime("%Y-%m-%d"): float(v) for d, v in cvu_diario.items()} if not cvu_diario.empty else {}},
+        "advanced_metrics": metricas_avancadas,
         "operacao": operacao,
         "alerts": alerts,
         "metadata": {
@@ -1221,18 +2648,51 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     }
 
     # ---------------- Persist ----------------
-    print("Vai salvar JSON agora")
+    _core_log("PERSIST", "Iniciando persistência do core")
 
+    # 1) Garantir diretório
     os.makedirs(output_dir, exist_ok=True)
-    
-    # REMOVER versões antigas primeiro
-    for filename in os.listdir(output_dir):
-        if filename.startswith("core_analysis_") and filename.endswith(".json"):
-            os.remove(os.path.join(output_dir, filename))
-    
-    # Salvar apenas o arquivo mais recente
-    path = os.path.join(output_dir, "core_analysis_latest.json")
-    
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(core, f, indent=2, ensure_ascii=False, default=str)
+
+    # 2) Salvar em arquivo temporário primeiro
+    temp_path = os.path.join(output_dir, "core_analysis_temp.json")
+    final_path = os.path.join(output_dir, "core_analysis_latest.json")
+
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(core, f, indent=2, ensure_ascii=False, default=str)
+
+        _core_log("PERSIST", "Arquivo temporário salvo com sucesso", temp_path=temp_path)
+
+        # 3) Limpar versões antigas (exceto temp recém-gerado)
+        removidos = []
+        for filename in os.listdir(output_dir):
+            if (
+                filename.startswith("core_analysis_")
+                and filename.endswith(".json")
+                and filename != "core_analysis_temp.json"
+            ):
+                target = os.path.join(output_dir, filename)
+                os.remove(target)
+                removidos.append(filename)
+
+        _core_log("PERSIST", "Arquivos anteriores removidos", removidos=len(removidos))
+
+        # 4) Promover temp para definitivo de forma atômica quando possível
+        os.replace(temp_path, final_path)
+
+    except Exception as e:
+        _core_log("PERSIST", "Falha ao salvar core_analysis_latest.json", final_path=final_path, erro=str(e))
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        raise
+
+    _core_log(
+        "PERSIST",
+        "core_analysis_latest.json salvo com sucesso",
+        path=final_path,
+        tamanho_bytes=os.path.getsize(final_path),
+    )
     return core
