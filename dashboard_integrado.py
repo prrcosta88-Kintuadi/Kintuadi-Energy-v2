@@ -777,8 +777,9 @@ def build_hourly_scenario_table(core: Dict[str, Any], selected_day: datetime.dat
 
     adv = core.get("advanced_metrics", {}) if isinstance(core, dict) else {}
     month_key = day_ts.strftime("%Y-%m")
-    ear_mensal = (adv.get("ear_media_mensal") or {}).get(month_key)
-    ena_mensal = (adv.get("ena_media_mensal") or {}).get(month_key)
+    day_key = day_ts.strftime("%Y-%m-%d")
+    ear_mensal = (adv.get("ear_media_diaria") or {}).get(day_key)
+    ena_mensal = (adv.get("ena_media_diaria") or {}).get(day_key)
 
     termica_mensal = None
     for row in (adv.get("matriz_cenario_mensal") or []):
@@ -1090,7 +1091,7 @@ def main():
             st.caption("Σ val_verifgfom / Σ val_verifgeracao")
         with c2:
             st.metric("GFOM × PLD", f"{ader.get('gfom_vs_pld_corr'):.2f}" if ader.get("gfom_vs_pld_corr") is not None else "—")
-            st.caption(ader.get("gfom_vs_pld_cenario", "—"))
+            st.caption((ader.get("gfom_vs_pld_cenario", "-") or "-") + " | Obs.: 0E-8 e notação científica são tratados como 0 quando aplicável.")
         with c3:
             st.metric("Curtailment", cls.get("curtailment_estrutural_vs_eletrico", "—"))
             st.caption("Estrutural vs elétrico vs operacional")
@@ -1106,12 +1107,12 @@ def main():
         with c7:
             st.metric("Regime abundância", "Sim" if adv.get("regime_abundancia") else "Não" if adv.get("regime_abundancia") is not None else "—")
 
-        regime_anual = adv.get("mudanca_regime_historica_anual", {})
-        if regime_anual:
-            st.markdown("**Mudança de regime histórica (anual):**")
+        regime_trimestral = adv.get("mudanca_regime_historica_trimestral", {})
+        if regime_trimestral:
+            st.markdown("**Mudança de regime histórica (trimestral):**")
             df_reg = pd.DataFrame(
-                [{"Ano": k, "Regime": v} for k, v in regime_anual.items()]
-            ).sort_values("Ano")
+                [{"Trimestre": k, "Regime": v} for k, v in regime_trimestral.items()]
+            ).sort_values("Trimestre")
             st.dataframe(df_reg, use_container_width=True, hide_index=True)
 
         margem_media_m = capr.get("margem_operativa_media_mensal", {})
@@ -1125,6 +1126,49 @@ def main():
             })
             st.markdown("**Margem operativa real (mensal):**")
             st.dataframe(df_marg, width="stretch", hide_index=True)
+
+        with st.expander("📘 Conceitos e critérios das métricas avançadas"):
+            met = adv.get("metodologia", {})
+            st.markdown("**GFOM vs PLD**")
+            st.write(met.get("gfom_vs_pld", "GFOM% = GFOM/geração verificada; correlação com PLD horário alinhado."))
+            st.markdown("**Margem operativa real (mensal)**")
+            st.write(met.get("margem_operativa_real", "Margem média = média horária mensal; Margem p5 = percentil 5% mensal."))
+            st.markdown("**Curtailment (operacional/elétrico/estrutural)**")
+            st.write(met.get("curtailment", "Critérios operacionais combinando intercâmbio, IPR, EAR e PLD."))
+            st.markdown("**IPR / ISR**")
+            st.write(met.get("ipr_isr", "IPR e ISR medem penetração renovável em relação à carga e carga líquida."))
+            st.markdown("**Regime de abundância**")
+            st.write(met.get("regime_abundancia", "Critério baseado em dependência térmica, EAR e PLD."))
+            st.markdown("**Mudança de regime (trimestral)**")
+            st.write(met.get("mudanca_regime_trimestral", "Classificação trimestral por stress e PLD."))
+
+        today = datetime.now().date()
+        first_day_this_month = today.replace(day=1)
+        last_closed = (first_day_this_month - timedelta(days=1)).strftime("%Y-%m")
+        st.caption(f"Mês de referência padrão: **{last_closed}** (último mês fechado).")
+
+        p1, p2, p3 = st.columns([1, 1, 1])
+        with p1:
+            dt_ini = st.date_input("Início", value=today - timedelta(days=30), key="adv_period_ini")
+        with p2:
+            dt_fim = st.date_input("Fim", value=today, key="adv_period_fim")
+        with p3:
+            run_period = st.button("Verificar métricas", key="btn_verificar_metricas")
+
+        if run_period:
+            if dt_fim < dt_ini:
+                st.warning("Período inválido: fim anterior ao início.")
+            else:
+                mtx = pd.DataFrame(adv.get("matriz_cenario_mensal", []))
+                if not mtx.empty and "mes" in mtx.columns:
+                    mtx["mes_dt"] = pd.to_datetime(mtx["mes"] + "-01", errors="coerce")
+                    m1 = pd.Timestamp(dt_ini).replace(day=1)
+                    m2 = pd.Timestamp(dt_fim).replace(day=1)
+                    mtx = mtx[(mtx["mes_dt"] >= m1) & (mtx["mes_dt"] <= m2)]
+                    st.markdown("**Matriz de cenário no período selecionado:**")
+                    st.dataframe(mtx.drop(columns=["mes_dt"]), width="stretch", hide_index=True)
+                else:
+                    st.info("Matriz mensal indisponível para o período selecionado.")
 
         st.markdown("**Consulta horária por dia (sem reprocessar o build_core_analysis):**")
         c_sel1, c_sel2 = st.columns([1, 1])

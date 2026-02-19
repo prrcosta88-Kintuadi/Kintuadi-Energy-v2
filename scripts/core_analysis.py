@@ -592,6 +592,9 @@ def _normalize_br_numeric_series(series: pd.Series) -> pd.Series:
     # Valores com múltiplos pontos: 25.000.000.000 -> 25000000000
     parsed.loc[~has_comma & many_dots] = parsed.loc[~has_comma & many_dots].str.replace(".", "", regex=False)
 
+    # Notação científica (ex.: 0E-8) já é interpretada por to_numeric e vira 0.0
+    parsed = parsed.str.replace(" ", "", regex=False)
+
     return pd.to_numeric(parsed, errors="coerce")
 
 
@@ -623,7 +626,10 @@ def _safe_corr(a: pd.Series, b: pd.Series, min_points: int = 24) -> Optional[flo
         df = pd.DataFrame({"a": a, "b": b}).dropna()
         if len(df) < min_points:
             return None
-        return float(df["a"].corr(df["b"]))
+        corr = df["a"].corr(df["b"])
+        if pd.isna(corr):
+            return None
+        return float(corr)
     except Exception:
         return None
 
@@ -1104,6 +1110,8 @@ def _compute_advanced_cross_metrics(
 
     ear_media_mensal = None
     ena_media_mensal = None
+    ear_media_diaria = None
+    ena_media_diaria = None
     matriz_cenario_mensal: List[Dict[str, Any]] = []
     try:
         ear_by_sub, ena_by_sub = _load_ear_ena_monthly_by_submercado(ons)
@@ -1123,6 +1131,47 @@ def _compute_advanced_cross_metrics(
             ena_media_mensal = {
                 i.strftime("%Y-%m"): float(v)
                 for i, v in pd.concat(ena_by_sub, axis=1).mean(axis=1, skipna=True).dropna().sort_index().items()
+            }
+
+        # Séries diárias (para consulta horária por dia no dashboard)
+        ear_daily_frames = []
+        for ear_file in _find_ons_csv_all(ons, "EAR_Diario_Subsistema"):
+            try:
+                dfe = pd.read_csv(ear_file, sep=None, engine="python")
+                if "ear_data" in dfe.columns and "ear_verif_subsistema_percentual" in dfe.columns:
+                    dfe["ear_data"] = pd.to_datetime(dfe["ear_data"], errors="coerce", dayfirst=True)
+                    dfe["ear_verif_subsistema_percentual"] = _normalize_br_numeric_series(dfe["ear_verif_subsistema_percentual"])
+                    dfe = dfe.dropna(subset=["ear_data", "ear_verif_subsistema_percentual"])
+                    if not dfe.empty:
+                        ear_daily_frames.append(dfe[["ear_data", "ear_verif_subsistema_percentual"]])
+            except Exception:
+                continue
+        if ear_daily_frames:
+            dfe = pd.concat(ear_daily_frames, ignore_index=True)
+            ear_media_diaria = {
+                i.strftime("%Y-%m-%d"): float(v)
+                for i, v in dfe.groupby("ear_data")["ear_verif_subsistema_percentual"].mean().sort_index().items()
+            }
+
+        ena_daily_frames = []
+        ena_candidates = ["ena_armazenavel_regiao_mwmed", "ena_bruta_regiao_mwmed", "val_enaarmazenavel", "val_enabruta"]
+        for ena_file in _find_ons_csv_all(ons, "ENA_Diario_Subsistema"):
+            try:
+                dfn = pd.read_csv(ena_file, sep=None, engine="python")
+                col_ena = next((c for c in ena_candidates if c in dfn.columns), None)
+                if "ena_data" in dfn.columns and col_ena:
+                    dfn["ena_data"] = pd.to_datetime(dfn["ena_data"], errors="coerce", dayfirst=True)
+                    dfn[col_ena] = _normalize_br_numeric_series(dfn[col_ena])
+                    dfn = dfn.dropna(subset=["ena_data", col_ena])
+                    if not dfn.empty:
+                        ena_daily_frames.append(dfn[["ena_data", col_ena]].rename(columns={col_ena: "ena_val"}))
+            except Exception:
+                continue
+        if ena_daily_frames:
+            dfn = pd.concat(ena_daily_frames, ignore_index=True)
+            ena_media_diaria = {
+                i.strftime("%Y-%m-%d"): float(v)
+                for i, v in dfn.groupby("ena_data")["ena_val"].mean().sort_index().items()
             }
 
         pld_m_global = _ensure_tz_naive_index(pld_series).resample("ME").mean()
@@ -1322,8 +1371,8 @@ def _compute_advanced_cross_metrics(
         else:
             curtailment_class_nova = "operacional"
 
-    # Mudança de regime histórica (anual)
-    mudanca_regime_anual = {}
+    # Mudança de regime histórica (trimestral)
+    mudanca_regime_trimestral = {}
     try:
         capacidade_disp_h = _ensure_tz_naive_index(capacidade_disp_h)
         carga_sin = _ensure_tz_naive_index(carga_sin)
@@ -1331,17 +1380,17 @@ def _compute_advanced_cross_metrics(
             df_reg = pd.DataFrame({"pld": pld_series, "cap": capacidade_disp_h, "carga": carga_sin}).dropna()
             if not df_reg.empty:
                 df_reg["stress"] = df_reg["carga"] / df_reg["cap"].replace(0, np.nan)
-                g = df_reg.groupby(df_reg.index.year).agg({"pld": "mean", "stress": "mean"}).dropna()
-                for yr, row in g.iterrows():
+                g = df_reg.groupby(df_reg.index.to_period("Q")).agg({"pld": "mean", "stress": "mean"}).dropna()
+                for q, row in g.iterrows():
                     if row["stress"] < 0.8 and row["pld"] > pld_series.quantile(0.7):
                         reg = "desalinhamento_estrutural"
                     elif row["stress"] > 1:
                         reg = "estresse_operacional"
                     else:
                         reg = "equilibrio"
-                    mudanca_regime_anual[str(int(yr))] = reg
+                    mudanca_regime_trimestral[str(q)] = reg
     except Exception as e:
-        step_errors["mudanca_regime_historica_anual"] = str(e)
+        step_errors["mudanca_regime_historica_trimestral"] = str(e)
 
     return {
         "status": "parcial" if step_errors else "disponível",
@@ -1352,6 +1401,8 @@ def _compute_advanced_cross_metrics(
         "ena_media": ena_media,
         "ear_media_mensal": ear_media_mensal,
         "ena_media_mensal": ena_media_mensal,
+        "ear_media_diaria": ear_media_diaria,
+        "ena_media_diaria": ena_media_diaria,
         "matriz_cenario_mensal": matriz_cenario_mensal,
         "horas_renovavel_gt_carga_liquida": horas_renovavel_gt_carga_liquida,
         "curtailment_percentual_total": curtailment.get("curtailment_pct_total"),
@@ -1368,6 +1419,14 @@ def _compute_advanced_cross_metrics(
             "curtailment_x_ear": classificacao_curtail_ear,
             "curtailment_x_intercambio": intercambio_classificacao,
             "curtailment_estrutural_vs_eletrico": curtailment_class_nova,
+        },
+        "metodologia": {
+            "gfom_vs_pld": "GFOM% horário = (val_verifgfom / val_verifgeracao)*100; correlação de Pearson com PLD horário após alinhamento temporal.",
+            "margem_operativa_real": "margem = (capacidade_disponivel_real - carga)/carga; margem média mensal = média da margem horária no mês; margem p5 = percentil 5% da margem horária no mês.",
+            "curtailment": "elétrico quando intercâmbio saturado (>=95% do limite) com curtailment>0; estrutural quando IPR>1, EAR>60 e PLD baixo; caso contrário operacional.",
+            "ipr_isr": "IPR = média((solar+eólica)/carga); ISR = média((solar+eólica)/carga_liquida).",
+            "regime_abundancia": "True quando dependência térmica <15%, EAR>70 e PLD <= 1.15*piso regulatório.",
+            "mudanca_regime_trimestral": "desalinhamento_estrutural: stress<0.8 e PLD no quantil alto; estresse_operacional: stress>1; senão equilíbrio.",
         },
         "volatilidade_intradiaria": {
             "sigma_pld": sigma_pld_intradiario,
@@ -1400,7 +1459,7 @@ def _compute_advanced_cross_metrics(
             "ipr_medio": ipr_medio,
             "isr_medio": isr_medio,
         },
-        "mudanca_regime_historica_anual": mudanca_regime_anual,
+        "mudanca_regime_historica_trimestral": mudanca_regime_trimestral,
     }
 
 
