@@ -8,6 +8,9 @@ import os
 import sys
 import subprocess
 import logging
+import json
+import shutil
+from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -105,6 +108,85 @@ def run_dashboard():
     except Exception as e:
         print(f"❌ Erro inesperado: {e}")
 
+
+
+def load_latest_raw_data():
+    latest_file = Path("data") / "kintuadi_latest.json"
+    if not latest_file.exists():
+        return None
+    try:
+        with latest_file.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Falha ao ler {latest_file}: {e}")
+        return None
+
+
+def run_core_analysis():
+    try:
+        from scripts.core_analysis import build_core_analysis
+    except Exception as e:
+        logger.error(f"Erro ao importar core_analysis: {e}")
+        return None
+
+    raw = load_latest_raw_data()
+    if not raw:
+        logger.error("kintuadi_latest.json indisponível para gerar core.")
+        return None
+
+    try:
+        core = build_core_analysis(raw, output_dir="data")
+        return core
+    except Exception as e:
+        logger.error(f"Falha ao gerar core_analysis_latest.json: {e}")
+        return None
+
+
+def publish_core_to_github(push: bool = True):
+    src = Path("data") / "core_analysis_latest.json"
+    dst = Path("core_analysis_latest.json")
+    if not src.exists():
+        logger.error("core_analysis_latest.json não encontrado em data/.")
+        return False
+
+    shutil.copy2(src, dst)
+
+    try:
+        subprocess.run(["git", "add", "core_analysis_latest.json"], check=True)
+        diff = subprocess.run(["git", "diff", "--cached", "--quiet"])
+        if diff.returncode == 0:
+            logger.info("Sem alterações no core_analysis_latest.json para commit.")
+            return True
+
+        msg = f"Atualiza core_analysis_latest.json [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
+        subprocess.run(["git", "commit", "-m", msg], check=True)
+        logger.info("Commit do core realizado com sucesso.")
+
+        if push:
+            try:
+                subprocess.run(["git", "push"], check=True)
+                logger.info("Push para GitHub realizado com sucesso.")
+            except Exception as e:
+                logger.warning(f"Commit feito, mas push falhou: {e}")
+        return True
+    except Exception as e:
+        logger.error(f"Falha ao commitar core no git: {e}")
+        return False
+
+
+def run_pipeline_and_publish(push: bool = True):
+    logger.info("Iniciando pipeline completo: coleta → integração → análise → publicação do core")
+    collected = run_collector_v2()
+    if not collected:
+        logger.error("Coleta/integração falhou.")
+        return False
+
+    core = run_core_analysis()
+    if not core:
+        logger.error("Análise (core) falhou.")
+        return False
+
+    return publish_core_to_github(push=push)
 def main():
     """Função principal"""
     
@@ -130,10 +212,12 @@ def main():
         print("3. Apenas abrir dashboard")
         print("4. Coleta rápida (teste)")
         print("5. Verificar sistema")
-        print("6. Sair")
+        print("6. Pipeline completo + commit/push do core no GitHub")
+        print("7. Abrir dashboard_espelho.py")
+        print("8. Sair")
         print("="*60)
         
-        choice = input("\nEscolha (1-6): ").strip()
+        choice = input("\nEscolha (1-8): ").strip()
         
         if choice == "1":
             # Coleta completa + Dashboard
@@ -161,6 +245,17 @@ def main():
             check_system()
         
         elif choice == "6":
+            print("\n🚀 Pipeline completo + publicação do core...")
+            run_pipeline_and_publish(push=True)
+
+        elif choice == "7":
+            print("\n🌐 Iniciando Dashboard Espelho...")
+            try:
+                subprocess.run([sys.executable, "-m", "streamlit", "run", "dashboard_espelho.py"], check=True)
+            except Exception as e:
+                print(f"❌ Erro ao executar dashboard_espelho: {e}")
+
+        elif choice == "8":
             print("\n👋 Até logo!")
             break
         
@@ -181,7 +276,7 @@ def check_system():
             print(f"❌ {d}/ (não existe)")
     
     # Verifica arquivos principais
-    files = ["dashboard_integrado.py", "requirements.txt", "run_collector.py"]
+    files = ["dashboard_integrado.py", "dashboard_espelho.py", "requirements.txt", "run_collector.py", "core_analysis_latest.json"]
     for f in files:
         if os.path.exists(f):
             print(f"✅ {f}")
