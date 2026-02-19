@@ -165,7 +165,7 @@ def _compute_hydrology_from_csv(ons: Dict[str, Any]) -> Dict[str, Any]:
                             continue
                         df[col] = _normalize_br_numeric_series(df[col])
                         if col_ts:
-                            df[col_ts] = pd.to_datetime(df[col_ts], errors="coerce", dayfirst=True)
+                            df[col_ts] = _parse_date_series(df[col_ts])
                         df = df.dropna(subset=[col])
                         if not df.empty:
                             cols = [c for c in [col_ts, col] if c]
@@ -204,7 +204,7 @@ def _compute_hydrology_from_csv(ons: Dict[str, Any]) -> Dict[str, Any]:
                             continue
                         df[col] = _normalize_br_numeric_series(df[col])
                         if col_ts:
-                            df[col_ts] = pd.to_datetime(df[col_ts], errors="coerce", dayfirst=True)
+                            df[col_ts] = _parse_date_series(df[col_ts])
                         df = df.dropna(subset=[col])
                         if not df.empty:
                             cols = [c for c in [col_ts, col] if c]
@@ -344,7 +344,7 @@ def _extract_open_data_historical_operation(ons: Dict[str, Any]) -> Dict[str, An
                 if not required.issubset(df.columns):
                     continue
 
-                df["din_instante"] = pd.to_datetime(df["din_instante"], errors="coerce", dayfirst=True)
+                df["din_instante"] = _parse_date_series(df["din_instante"])
                 df["val_geracao"] = _normalize_br_numeric_series(df["val_geracao"])
                 df = df.dropna(subset=["din_instante", "val_geracao"])
                 if df.empty:
@@ -361,7 +361,7 @@ def _extract_open_data_historical_operation(ons: Dict[str, Any]) -> Dict[str, An
                 if not required.issubset(df.columns):
                     continue
 
-                df["din_instante"] = pd.to_datetime(df["din_instante"], errors="coerce", dayfirst=True)
+                df["din_instante"] = _parse_date_series(df["din_instante"])
                 df["val_cargaenergiahomwmed"] = _normalize_br_numeric_series(df["val_cargaenergiahomwmed"])
                 df = df.dropna(subset=["din_instante", "id_subsistema", "val_cargaenergiahomwmed"])
                 if df.empty:
@@ -465,7 +465,7 @@ def _compute_curtailment_from_csv(
         if "din_instante" not in df.columns:
             return {"status": "indisponível"}
 
-        df["din_instante"] = pd.to_datetime(df["din_instante"], errors="coerce", dayfirst=True)
+        df["din_instante"] = _parse_date_series(df["din_instante"])
         df = df.dropna(subset=["din_instante"])
 
         if col_flag_invalido and col_flag_invalido in df.columns:
@@ -598,6 +598,33 @@ def _normalize_br_numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(parsed, errors="coerce")
 
 
+
+
+def _parse_date_series(series: pd.Series) -> pd.Series:
+    """Parse robusto para datas priorizando padrão brasileiro (dd/mm/aaaa)."""
+    if series is None or series.empty:
+        return pd.Series(dtype="datetime64[ns]")
+
+    raw = series.astype(str).str.strip()
+    out = pd.Series(pd.NaT, index=raw.index, dtype="datetime64[ns]")
+
+    # ISO/ano-primeiro: mantém parsing padrão para evitar inversões.
+    mask_iso = raw.str.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}")
+    if mask_iso.any():
+        out.loc[mask_iso] = pd.to_datetime(raw.loc[mask_iso], errors="coerce")
+
+    # Fontes ONS/CCEE com dia primeiro (dd/mm/aaaa [HH:MM[:SS]]).
+    mask_br = ~mask_iso
+    if mask_br.any():
+        out.loc[mask_br] = pd.to_datetime(raw.loc[mask_br], errors="coerce", dayfirst=True)
+
+    # Fallback final para casos residuais.
+    rem = out.isna()
+    if rem.any():
+        out.loc[rem] = pd.to_datetime(raw.loc[rem], errors="coerce")
+
+    return out
+
 def _to_series(records: List[Dict[str, Any]], value_key: str) -> pd.Series:
     if not records:
         return pd.Series(dtype=float)
@@ -607,7 +634,7 @@ def _to_series(records: List[Dict[str, Any]], value_key: str) -> pd.Series:
         if "instante" not in df.columns or value_key not in df.columns:
             return pd.Series(dtype=float)
 
-        df["instante"] = pd.to_datetime(df["instante"], errors="coerce", dayfirst=True)
+        df["instante"] = _parse_date_series(df["instante"])
         df[value_key] = _normalize_br_numeric_series(df[value_key])
         df = df.dropna(subset=["instante", value_key]).sort_values("instante")
         if df.empty:
@@ -715,7 +742,7 @@ def _load_gfom_hourly(ons: Dict[str, Any]) -> pd.DataFrame:
             col_gfom = "val_verifgfom" if "val_verifgfom" in df.columns else None
             if not col_ger or not col_gfom:
                 continue
-            df["din_instante"] = pd.to_datetime(df["din_instante"], errors="coerce", dayfirst=True)
+            df["din_instante"] = _parse_date_series(df["din_instante"])
             df[col_ger] = _normalize_br_numeric_series(df[col_ger])
             df[col_gfom] = _normalize_br_numeric_series(df[col_gfom])
             df = df.dropna(subset=["din_instante", col_ger, col_gfom])
@@ -751,7 +778,7 @@ def _load_gfom_hourly_by_submarket(ons: Dict[str, Any]) -> Dict[str, pd.DataFram
             if not col_sub or not col_ger or not col_gfom:
                 continue
 
-            df["din_instante"] = pd.to_datetime(df["din_instante"], errors="coerce", dayfirst=True)
+            df["din_instante"] = _parse_date_series(df["din_instante"])
             df[col_ger] = _normalize_br_numeric_series(df[col_ger])
             df[col_gfom] = _normalize_br_numeric_series(df[col_gfom])
             df["submercado"] = df[col_sub].map(_normalize_submercado_name)
@@ -789,7 +816,7 @@ def _load_disponibilidade_horaria(ons: Dict[str, Any]) -> pd.Series:
             col_val = next((c for c in ["val_dispoperacional", "val_dispsincronizada", "val_potenciainstalada"] if c in df.columns), None)
             if not col_val:
                 continue
-            df["din_instante"] = pd.to_datetime(df["din_instante"], errors="coerce", dayfirst=True)
+            df["din_instante"] = _parse_date_series(df["din_instante"])
             df[col_val] = _normalize_power_to_mw(_normalize_br_numeric_series(df[col_val]))
             df = df.dropna(subset=["din_instante", col_val])
             if df.empty:
@@ -818,7 +845,7 @@ def _load_ear_ena_monthly_by_submercado(ons: Dict[str, Any]) -> Tuple[Dict[str, 
             col_ear = "ear_verif_subsistema_percentual" if "ear_verif_subsistema_percentual" in df.columns else None
             if not col_ts or not col_sub or not col_ear:
                 continue
-            df[col_ts] = pd.to_datetime(df[col_ts], errors="coerce", dayfirst=True)
+            df[col_ts] = _parse_date_series(df[col_ts])
             df[col_ear] = _normalize_br_numeric_series(df[col_ear])
             df["submercado"] = df[col_sub].map(_normalize_submercado_name)
             df = df.dropna(subset=[col_ts, col_ear, "submercado"])
@@ -851,7 +878,7 @@ def _load_ear_ena_monthly_by_submercado(ons: Dict[str, Any]) -> Tuple[Dict[str, 
             )
             if not col_ts or not col_sub or not col_ena:
                 continue
-            df[col_ts] = pd.to_datetime(df[col_ts], errors="coerce", dayfirst=True)
+            df[col_ts] = _parse_date_series(df[col_ts])
             df[col_ena] = _normalize_br_numeric_series(df[col_ena])
             df["submercado"] = df[col_sub].map(_normalize_submercado_name)
             df = df.dropna(subset=[col_ts, col_ena, "submercado"])
@@ -894,7 +921,7 @@ def _compute_effective_availability_margin(
         if col_val is None:
             return {"status": "indisponível"}
 
-        df[col_ts] = pd.to_datetime(df[col_ts], errors="coerce", dayfirst=True)
+        df[col_ts] = _parse_date_series(df[col_ts])
         df[col_val] = _normalize_br_numeric_series(df[col_val])
         df[col_val] = _normalize_power_to_mw(df[col_val])
         df = df.dropna(subset=[col_ts, col_val])
@@ -936,7 +963,7 @@ def _compute_termica_share_from_gfom(ons: Dict[str, Any]) -> Optional[float]:
         if col_ger is None:
             return None
 
-        df["din_instante"] = pd.to_datetime(df["din_instante"], errors="coerce", dayfirst=True)
+        df["din_instante"] = _parse_date_series(df["din_instante"])
         df[col_ger] = _normalize_br_numeric_series(df[col_ger])
         df = df.dropna(subset=["din_instante", col_ger])
         if df.empty:
@@ -1091,7 +1118,7 @@ def _compute_advanced_cross_metrics(
                     col_ear = "ear_verif_subsistema_percentual" if "ear_verif_subsistema_percentual" in df_ear.columns else None
                     if not col_ts or not col_ear:
                         continue
-                    df_ear[col_ts] = pd.to_datetime(df_ear[col_ts], errors="coerce", dayfirst=True)
+                    df_ear[col_ts] = _parse_date_series(df_ear[col_ts])
                     df_ear[col_ear] = _normalize_br_numeric_series(df_ear[col_ear])
                     df_ear = df_ear.dropna(subset=[col_ts, col_ear])
                     if not df_ear.empty:
@@ -1140,7 +1167,7 @@ def _compute_advanced_cross_metrics(
             try:
                 dfe = pd.read_csv(ear_file, sep=None, engine="python")
                 if "ear_data" in dfe.columns and "ear_verif_subsistema_percentual" in dfe.columns:
-                    dfe["ear_data"] = pd.to_datetime(dfe["ear_data"], errors="coerce", dayfirst=True)
+                    dfe["ear_data"] = _parse_date_series(dfe["ear_data"])
                     dfe["ear_verif_subsistema_percentual"] = _normalize_br_numeric_series(dfe["ear_verif_subsistema_percentual"])
                     dfe = dfe.dropna(subset=["ear_data", "ear_verif_subsistema_percentual"])
                     if not dfe.empty:
@@ -1161,7 +1188,7 @@ def _compute_advanced_cross_metrics(
                 dfn = pd.read_csv(ena_file, sep=None, engine="python")
                 col_ena = next((c for c in ena_candidates if c in dfn.columns), None)
                 if "ena_data" in dfn.columns and col_ena:
-                    dfn["ena_data"] = pd.to_datetime(dfn["ena_data"], errors="coerce", dayfirst=True)
+                    dfn["ena_data"] = _parse_date_series(dfn["ena_data"])
                     dfn[col_ena] = _normalize_br_numeric_series(dfn[col_ena])
                     dfn = dfn.dropna(subset=["ena_data", col_ena])
                     if not dfn.empty:
@@ -1181,14 +1208,19 @@ def _compute_advanced_cross_metrics(
 
         idx = pld_m_global.index
         for extra in [
-            pd.to_datetime(list((ear_media_mensal or {}).keys()), format="%Y-%m", errors="coerce") if ear_media_mensal else pd.DatetimeIndex([]),
-            pd.to_datetime(list((ena_media_mensal or {}).keys()), format="%Y-%m", errors="coerce") if ena_media_mensal else pd.DatetimeIndex([]),
+            (pd.to_datetime(list((ear_media_mensal or {}).keys()), format="%Y-%m", errors="coerce") + pd.offsets.MonthEnd(0)) if ear_media_mensal else pd.DatetimeIndex([]),
+            (pd.to_datetime(list((ena_media_mensal or {}).keys()), format="%Y-%m", errors="coerce") + pd.offsets.MonthEnd(0)) if ena_media_mensal else pd.DatetimeIndex([]),
             carga_liquida_m.index if not carga_liquida_m.empty else pd.DatetimeIndex([]),
             termica_pct_m.index if not termica_pct_m.empty else pd.DatetimeIndex([]),
         ]:
             idx = idx.union(extra)
 
+        seen_months = set()
         for month in sorted([i for i in idx if not pd.isna(i)]):
+            month_label = month.strftime("%Y-%m")
+            if month_label in seen_months:
+                continue
+            seen_months.add(month_label)
             pld_v = float(pld_m_global.get(month)) if month in pld_m_global.index and pd.notna(pld_m_global.get(month)) else None
             ear_v = ear_media_mensal.get(month.strftime("%Y-%m")) if ear_media_mensal else None
             ena_v = ena_media_mensal.get(month.strftime("%Y-%m")) if ena_media_mensal else None
@@ -1207,7 +1239,7 @@ def _compute_advanced_cross_metrics(
                 cenario = "equilibrio_operacional"
 
             matriz_cenario_mensal.append({
-                "mes": month.strftime("%Y-%m"),
+                "mes": month_label,
                 "pld_medio": pld_v,
                 "ear_medio": ear_v,
                 "ena_media": ena_v,
@@ -1271,12 +1303,12 @@ def _compute_advanced_cross_metrics(
                 continue
             df_i = pd.read_csv(file)
             if "instante" in df_i.columns and "intercambio" in df_i.columns:
-                df_i["instante"] = pd.to_datetime(df_i["instante"], errors="coerce", dayfirst=True)
+                df_i["instante"] = _parse_date_series(df_i["instante"])
                 df_i["intercambio"] = _normalize_br_numeric_series(df_i["intercambio"])
                 s_i = df_i.dropna(subset=["instante", "intercambio"]).set_index("instante")["intercambio"]
                 intercambio_series = s_i if intercambio_series.empty else intercambio_series.add(s_i, fill_value=0)
             if "instante" in df_i.columns and "limite" in df_i.columns:
-                df_i["instante"] = pd.to_datetime(df_i["instante"], errors="coerce", dayfirst=True)
+                df_i["instante"] = _parse_date_series(df_i["instante"])
                 df_i["limite"] = _normalize_br_numeric_series(df_i["limite"])
                 s_l = df_i.dropna(subset=["instante", "limite"]).set_index("instante")["limite"]
                 limite_series = s_l if limite_series.empty else limite_series.add(s_l, fill_value=0)
@@ -2013,29 +2045,87 @@ def calcular_indicadores_termicos_revisados(
 
 
 def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
-    """Retorna série semanal média de CVU por dat_fimsemana."""
-    cvu_file = _find_ons_csv(ons, "CVU_Usina_Termica")
-    if not cvu_file or not os.path.exists(cvu_file):
+    """Retorna série semanal média de CVU por dat_fimsemana (consolidando múltiplos arquivos)."""
+    files = _find_ons_csv_all(ons, "CVU_Usina_Termica")
+    if not files:
         return pd.Series(dtype=float)
 
-    try:
-        df = pd.read_csv(cvu_file, sep=None, engine="python")
-        if "val_cvu" not in df.columns:
-            return pd.Series(dtype=float)
-        if "dat_fimsemana" not in df.columns:
-            return pd.Series(dtype=float)
+    frames: List[pd.DataFrame] = []
+    for cvu_file in files:
+        try:
+            df = pd.read_csv(cvu_file, sep=None, engine="python")
+            needed = {"dat_iniciosemana", "dat_fimsemana", "val_cvu"}
+            if not needed.issubset(df.columns):
+                continue
+            df = df[["dat_iniciosemana", "dat_fimsemana", "val_cvu"]].copy()
+            df["dat_iniciosemana"] = _parse_date_series(df["dat_iniciosemana"])
+            df["dat_fimsemana"] = _parse_date_series(df["dat_fimsemana"])
+            df["val_cvu"] = _normalize_br_numeric_series(df["val_cvu"])
+            df = df.dropna(subset=["dat_iniciosemana", "dat_fimsemana", "val_cvu"])
+            df = df[df["val_cvu"] > 0]
+            if not df.empty:
+                frames.append(df)
+        except Exception:
+            continue
 
-        df["val_cvu"] = _normalize_br_numeric_series(df["val_cvu"])
-        df["dat_fimsemana"] = pd.to_datetime(df["dat_fimsemana"], errors="coerce", dayfirst=True)
-        df = df.dropna(subset=["dat_fimsemana", "val_cvu"])
-        df = df[df["val_cvu"] > 0]
-        if df.empty:
-            return pd.Series(dtype=float)
-
-        s = df.groupby("dat_fimsemana")["val_cvu"].mean().sort_index()
-        return s
-    except Exception:
+    if not frames:
         return pd.Series(dtype=float)
+
+    all_df = pd.concat(frames, ignore_index=True)
+    weekly = (
+        all_df.groupby(["dat_iniciosemana", "dat_fimsemana"], as_index=False)["val_cvu"]
+        .mean()
+        .sort_values("dat_fimsemana")
+    )
+    if weekly.empty:
+        return pd.Series(dtype=float)
+    return weekly.set_index("dat_fimsemana")["val_cvu"].astype(float)
+
+
+def _expand_cvu_weekly_to_daily(ons: Dict[str, Any]) -> pd.Series:
+    """Expande CVU semanal para valor diário no intervalo dat_iniciosemana..dat_fimsemana."""
+    files = _find_ons_csv_all(ons, "CVU_Usina_Termica")
+    if not files:
+        return pd.Series(dtype=float)
+
+    frames: List[pd.DataFrame] = []
+    for cvu_file in files:
+        try:
+            df = pd.read_csv(cvu_file, sep=None, engine="python")
+            needed = {"dat_iniciosemana", "dat_fimsemana", "val_cvu"}
+            if not needed.issubset(df.columns):
+                continue
+            df = df[["dat_iniciosemana", "dat_fimsemana", "val_cvu"]].copy()
+            df["dat_iniciosemana"] = _parse_date_series(df["dat_iniciosemana"])
+            df["dat_fimsemana"] = _parse_date_series(df["dat_fimsemana"])
+            df["val_cvu"] = _normalize_br_numeric_series(df["val_cvu"])
+            df = df.dropna(subset=["dat_iniciosemana", "dat_fimsemana", "val_cvu"])
+            df = df[df["val_cvu"] > 0]
+            if not df.empty:
+                frames.append(df)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.Series(dtype=float)
+
+    wk = (
+        pd.concat(frames, ignore_index=True)
+        .groupby(["dat_iniciosemana", "dat_fimsemana"], as_index=False)["val_cvu"]
+        .mean()
+    )
+    daily_vals: Dict[pd.Timestamp, float] = {}
+    for _, r in wk.iterrows():
+        start = pd.Timestamp(r["dat_iniciosemana"]).floor("D")
+        end = pd.Timestamp(r["dat_fimsemana"]).floor("D")
+        if end < start:
+            start, end = end, start
+        for d in pd.date_range(start, end, freq="D"):
+            daily_vals[d] = float(r["val_cvu"])
+
+    if not daily_vals:
+        return pd.Series(dtype=float)
+    return pd.Series(daily_vals).sort_index()
 
 
 def _compute_cvu_from_csv(ons: Dict[str, Any]) -> Optional[float]:
@@ -2417,6 +2507,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
 
     # ---------------- Despacho térmico ----------------
     cvu_semanal = _load_cvu_weekly_series(ons)
+    cvu_diario = _expand_cvu_weekly_to_daily(ons)
     cvu_medio = _compute_cvu_from_csv(ons)
     
     # Calcular indicadores térmicos REVISADOS (v5)
@@ -2541,7 +2632,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
             "pld_horario_7d": pld_serie_7d,
         },
         # ESTRUTURA REVISADA: Análise térmica com dupla perspectiva
-        "thermal_analysis": {**indicadores_termicos, "cvu_semanal": {d.strftime("%Y-%m-%d"): float(v) for d, v in cvu_semanal.items()} if not cvu_semanal.empty else {}},
+        "thermal_analysis": {**indicadores_termicos, "cvu_semanal": {d.strftime("%Y-%m-%d"): float(v) for d, v in cvu_semanal.items()} if not cvu_semanal.empty else {}, "cvu_diario": {d.strftime("%Y-%m-%d"): float(v) for d, v in cvu_diario.items()} if not cvu_diario.empty else {}},
         "advanced_metrics": metricas_avancadas,
         "operacao": operacao,
         "alerts": alerts,

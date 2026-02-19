@@ -847,14 +847,22 @@ def _compute_thermal_by_period(core: Dict[str, Any], dt_ini: date, dt_fim: date)
 
         # CVU médio semanal no período (se disponível); fallback para valor de referência do core
         thermal_base = core.get("thermal_analysis", {}) if isinstance(core, dict) else {}
+        cvu_diario = thermal_base.get("cvu_diario", {}) if isinstance(thermal_base, dict) else {}
         cvu_semanal = thermal_base.get("cvu_semanal", {}) if isinstance(thermal_base, dict) else {}
         cvu_medio = None
-        if isinstance(cvu_semanal, dict) and cvu_semanal:
-            s = pd.Series({pd.to_datetime(k, errors="coerce"): v for k, v in cvu_semanal.items()})
-            s = pd.to_numeric(s, errors="coerce").dropna()
-            s = s[(s.index >= pd.Timestamp(dt_ini)) & (s.index <= pd.Timestamp(dt_fim))]
-            if not s.empty:
-                cvu_medio = float(s.mean())
+        if isinstance(cvu_diario, dict) and cvu_diario:
+            sd = pd.Series({pd.to_datetime(k, errors="coerce"): v for k, v in cvu_diario.items()})
+            sd = pd.to_numeric(sd, errors="coerce").dropna()
+            sd = sd[(sd.index >= pd.Timestamp(dt_ini)) & (sd.index <= pd.Timestamp(dt_fim))]
+            if not sd.empty:
+                cvu_medio = float(sd.mean())
+
+        if cvu_medio is None and isinstance(cvu_semanal, dict) and cvu_semanal:
+            sw = pd.Series({pd.to_datetime(k, errors="coerce"): v for k, v in cvu_semanal.items()})
+            sw = pd.to_numeric(sw, errors="coerce").dropna()
+            sw = sw[(sw.index >= pd.Timestamp(dt_ini)) & (sw.index <= pd.Timestamp(dt_fim))]
+            if not sw.empty:
+                cvu_medio = float(sw.mean())
 
         if cvu_medio is None:
             cvu_medio = ((thermal_base.get("dados_referencia") or {}).get("cvu_medio")) if isinstance(thermal_base, dict) else None
