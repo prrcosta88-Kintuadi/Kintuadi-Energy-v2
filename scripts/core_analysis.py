@@ -1113,6 +1113,7 @@ def _compute_advanced_cross_metrics(
     ear_media_diaria = None
     ena_media_diaria = None
     matriz_cenario_mensal: List[Dict[str, Any]] = []
+    matriz_cenario_diaria: List[Dict[str, Any]] = []
     try:
         ear_by_sub, ena_by_sub = _load_ear_ena_monthly_by_submercado(ons)
         for sm, pld_sm in pld_series_by_submercado.items():
@@ -1371,6 +1372,118 @@ def _compute_advanced_cross_metrics(
         else:
             curtailment_class_nova = "operacional"
 
+    # Matriz diária para uso no dashboard (cards c1..c7 por período)
+    try:
+        pld_h = _ensure_tz_naive_index(pld_series)
+        pld_d = pld_h.groupby(pld_h.index.floor("D")).mean() if not pld_h.empty else pd.Series(dtype=float)
+
+        gfom_pct_d = pd.Series(dtype=float)
+        if not gfom_h.empty:
+            gtmp = gfom_h.copy()
+            gtmp.index = pd.to_datetime(gtmp.index, errors="coerce", utc=True).tz_localize(None)
+            gtmp = gtmp[~gtmp.index.isna()].groupby(level=0).sum().sort_index()
+            if not gtmp.empty:
+                gtmp_d = gtmp.groupby(gtmp.index.floor("D")).sum()
+                gfom_pct_d = (gtmp_d["gfom"] / gtmp_d["ger"].replace(0, np.nan) * 100).replace([np.inf, -np.inf], np.nan)
+
+        gfom_corr_d = pd.Series(dtype=float)
+        if not pld_h.empty and not gfom_h.empty:
+            gtmp = gfom_h.copy()
+            gtmp.index = pd.to_datetime(gtmp.index, errors="coerce", utc=True).tz_localize(None)
+            gtmp = gtmp[~gtmp.index.isna()].groupby(level=0).sum().sort_index()
+            gfom_pct_h_local = (gtmp["gfom"] / gtmp["ger"].replace(0, np.nan) * 100).replace([np.inf, -np.inf], np.nan)
+            df_gp_h = pd.DataFrame({"pld": pld_h, "gfom_pct": gfom_pct_h_local}).dropna()
+            if not df_gp_h.empty:
+                vals = {}
+                for d, grp in df_gp_h.groupby(df_gp_h.index.floor("D")):
+                    vals[d] = _safe_corr(grp["pld"], grp["gfom_pct"], min_points=12)
+                gfom_corr_d = pd.Series(vals)
+
+        stress_d = pd.Series(dtype=float)
+        if not capacidade_disp_h.empty and not carga_sin.empty:
+            df_capd = pd.DataFrame({"cap": capacidade_disp_h, "carga": carga_sin}).dropna()
+            df_capd = df_capd[df_capd["cap"] > 0]
+            if not df_capd.empty:
+                stress_d = (df_capd["carga"] / df_capd["cap"]).groupby(df_capd.index.floor("D")).mean()
+
+        ipr_d = pd.Series(dtype=float)
+        if not carga_sin.empty:
+            renov_dfr = pd.DataFrame({"renov": solar.add(eolica, fill_value=0), "carga": carga_sin}).dropna()
+            renov_dfr = renov_dfr[renov_dfr["carga"] > 0]
+            if not renov_dfr.empty:
+                ipr_d = (renov_dfr["renov"] / renov_dfr["carga"]).groupby(renov_dfr.index.floor("D")).mean()
+
+        isr_d = pd.Series(dtype=float)
+        if not carga_liquida.empty:
+            df_isrd = pd.DataFrame({"renov": solar.add(eolica, fill_value=0), "carga_liquida": carga_liquida}).dropna()
+            df_isrd = df_isrd[df_isrd["carga_liquida"] > 0]
+            if not df_isrd.empty:
+                isr_d = (df_isrd["renov"] / df_isrd["carga_liquida"]).groupby(df_isrd.index.floor("D")).mean()
+
+        term_dep_d = pd.Series(dtype=float)
+        if not termica.empty and not geracao_total.empty:
+            dft = pd.DataFrame({"term": termica, "tot": geracao_total}).dropna()
+            dft = dft[dft["tot"] > 0]
+            if not dft.empty:
+                term_dep_d = ((dft["term"] / dft["tot"]) * 100).groupby(dft.index.floor("D")).mean()
+
+        curtailment_d = pd.Series(dtype=float)
+        try:
+            sol_rec = ((curtailment.get("solar") or {}).get("serie") or [])
+            eol_rec = ((curtailment.get("eolica") or {}).get("serie") or [])
+            s_sol = _to_series(sol_rec, "valor") if sol_rec else pd.Series(dtype=float)
+            s_eol = _to_series(eol_rec, "valor") if eol_rec else pd.Series(dtype=float)
+            if not s_sol.empty or not s_eol.empty:
+                curtailment_d = s_sol.add(s_eol, fill_value=0).groupby(lambda x: pd.Timestamp(x).floor("D")).sum()
+        except Exception:
+            curtailment_d = pd.Series(dtype=float)
+
+        ear_daily = pd.Series({pd.to_datetime(k): v for k, v in (ear_media_diaria or {}).items()}) if ear_media_diaria else pd.Series(dtype=float)
+
+        idx_days = pd.DatetimeIndex([])
+        for ser in [pld_d, gfom_pct_d, gfom_corr_d, stress_d, ipr_d, isr_d, term_dep_d, curtailment_d, ear_daily]:
+            if not ser.empty:
+                idx_days = idx_days.union(pd.DatetimeIndex(ser.index))
+
+        for d in sorted(idx_days):
+            pldv = pld_d.get(d)
+            gpv = gfom_pct_d.get(d)
+            gcv = gfom_corr_d.get(d)
+            stv = stress_d.get(d)
+            ipv = ipr_d.get(d)
+            isv = isr_d.get(d)
+            tdv = term_dep_d.get(d)
+            ctv = curtailment_d.get(d)
+            earv = ear_daily.get(d)
+
+            if ctv is None or pd.isna(ctv) or ctv <= 0:
+                curt_state = "inexistente"
+            elif intercambio_saturado:
+                curt_state = "eletrico"
+            elif (ipv is not None and not pd.isna(ipv) and ipv > 1) and (earv is not None and not pd.isna(earv) and earv > 60) and (pldv is not None and not pd.isna(pldv) and pldv <= PLD_PISO * 1.1):
+                curt_state = "estrutural"
+            else:
+                curt_state = "operacional"
+
+            abund = None
+            if tdv is not None and not pd.isna(tdv) and earv is not None and not pd.isna(earv) and pldv is not None and not pd.isna(pldv):
+                abund = bool(tdv < 15 and earv > 70 and pldv <= PLD_PISO * 1.15)
+
+            matriz_cenario_diaria.append({
+                "dia": pd.Timestamp(d).strftime("%Y-%m-%d"),
+                "gfom_pct": None if pd.isna(gpv) else float(gpv),
+                "gfom_vs_pld_corr": None if pd.isna(gcv) else float(gcv),
+                "curtailment_estado": curt_state,
+                "stress_operacional_medio": None if pd.isna(stv) else float(stv),
+                "ipr_medio": None if pd.isna(ipv) else float(ipv),
+                "isr_medio": None if pd.isna(isv) else float(isv),
+                "regime_abundancia": abund,
+                "pld_medio_dia": None if pd.isna(pldv) else float(pldv),
+                "ear_medio_dia": None if pd.isna(earv) else float(earv),
+            })
+    except Exception as e:
+        step_errors["matriz_cenario_diaria"] = str(e)
+
     # Mudança de regime histórica (trimestral)
     mudanca_regime_trimestral = {}
     try:
@@ -1404,6 +1517,7 @@ def _compute_advanced_cross_metrics(
         "ear_media_diaria": ear_media_diaria,
         "ena_media_diaria": ena_media_diaria,
         "matriz_cenario_mensal": matriz_cenario_mensal,
+        "matriz_cenario_diaria": matriz_cenario_diaria,
         "horas_renovavel_gt_carga_liquida": horas_renovavel_gt_carga_liquida,
         "curtailment_percentual_total": curtailment.get("curtailment_pct_total"),
         "correlacoes": {
@@ -1898,37 +2012,38 @@ def calcular_indicadores_termicos_revisados(
     }
 
 
-def _compute_cvu_from_csv(ons: Dict[str, Any]) -> Optional[float]:
+def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
+    """Retorna série semanal média de CVU por dat_fimsemana."""
     cvu_file = _find_ons_csv(ons, "CVU_Usina_Termica")
-
     if not cvu_file or not os.path.exists(cvu_file):
-        return None
+        return pd.Series(dtype=float)
 
     try:
         df = pd.read_csv(cvu_file, sep=None, engine="python")
         if "val_cvu" not in df.columns:
-            return None
+            return pd.Series(dtype=float)
+        if "dat_fimsemana" not in df.columns:
+            return pd.Series(dtype=float)
 
-        # CVU é semanal (dat_iniciosemana/dat_fimsemana).
-        # Primeiro tenta usar a última semana disponível; fallback para média global positiva.
         df["val_cvu"] = _normalize_br_numeric_series(df["val_cvu"])
-        df = df.dropna(subset=["val_cvu"])
+        df["dat_fimsemana"] = pd.to_datetime(df["dat_fimsemana"], errors="coerce", dayfirst=True)
+        df = df.dropna(subset=["dat_fimsemana", "val_cvu"])
         df = df[df["val_cvu"] > 0]
         if df.empty:
-            return None
+            return pd.Series(dtype=float)
 
-        col_fim = "dat_fimsemana" if "dat_fimsemana" in df.columns else None
-        if col_fim:
-            df[col_fim] = pd.to_datetime(df[col_fim], errors="coerce", dayfirst=True)
-            df_semana = df.dropna(subset=[col_fim])
-            if not df_semana.empty:
-                ultima_semana = df_semana[col_fim].max()
-                semana_atual = df_semana[df_semana[col_fim] == ultima_semana]
-                if not semana_atual.empty:
-                    return float(semana_atual["val_cvu"].mean())
+        s = df.groupby("dat_fimsemana")["val_cvu"].mean().sort_index()
+        return s
+    except Exception:
+        return pd.Series(dtype=float)
 
-        return float(df["val_cvu"].mean())
 
+def _compute_cvu_from_csv(ons: Dict[str, Any]) -> Optional[float]:
+    s = _load_cvu_weekly_series(ons)
+    if s.empty:
+        return None
+    try:
+        return float(s.iloc[-1])
     except Exception:
         return None
 
@@ -2301,6 +2416,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
         )
 
     # ---------------- Despacho térmico ----------------
+    cvu_semanal = _load_cvu_weekly_series(ons)
     cvu_medio = _compute_cvu_from_csv(ons)
     
     # Calcular indicadores térmicos REVISADOS (v5)
@@ -2425,7 +2541,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
             "pld_horario_7d": pld_serie_7d,
         },
         # ESTRUTURA REVISADA: Análise térmica com dupla perspectiva
-        "thermal_analysis": indicadores_termicos,
+        "thermal_analysis": {**indicadores_termicos, "cvu_semanal": {d.strftime("%Y-%m-%d"): float(v) for d, v in cvu_semanal.items()} if not cvu_semanal.empty else {}},
         "advanced_metrics": metricas_avancadas,
         "operacao": operacao,
         "alerts": alerts,
