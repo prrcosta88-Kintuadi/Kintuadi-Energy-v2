@@ -4,8 +4,62 @@ import pandas as pd
 from datetime import datetime, timedelta, date
 import logging
 from typing import List, Dict, Optional, Any
-from .data_models import PLDData, DataMetadata
-from .audit_logger import AuditLogger
+try:
+    from .data_models import PLDData, DataMetadata
+except Exception:
+    from dataclasses import dataclass
+
+    @dataclass
+    class DataMetadata:
+        source: str
+        collection_time: str
+        status: str
+        records_processed: int = 0
+        error_message: str = ""
+
+        def to_dict(self):
+            return {
+                "source": self.source,
+                "collection_time": self.collection_time,
+                "status": self.status,
+                "records_processed": self.records_processed,
+                "error_message": self.error_message,
+            }
+
+    @dataclass
+    class PLDData:
+        data: str
+        submercado: str
+        pld_valor: float
+        hora: int = 0
+        mes_referencia: int = 0
+        periodo_comercializacao: int = 0
+
+        def to_dict(self):
+            return {
+                "data": self.data,
+                "submercado": self.submercado,
+                "pld": self.pld_valor,
+                "pld_hora": self.pld_valor,
+                "hora": self.hora,
+                "mes_referencia": self.mes_referencia,
+                "periodo_comercializacao": self.periodo_comercializacao,
+            }
+
+try:
+    from .audit_logger import AuditLogger
+except Exception:
+    class AuditLogger:
+        def save_raw_data(self, *args, **kwargs):
+            return None
+        def log_data_transformation(self, *args, **kwargs):
+            return None
+        def log_consolidation(self, *args, **kwargs):
+            return None
+        def log_api_call(self, *args, **kwargs):
+            return None
+        def log_anomaly(self, *args, **kwargs):
+            return None
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +186,78 @@ class CCEEPLDCollector:
         for name, resource_id in self._additional_datasets.items():
             datasets[name] = self._fetch_dataset(resource_id, limit=limit)
         return datasets
+
+
+    def collect_pld_historical(self) -> Dict[str, Any]:
+        """Compatibilidade com pipeline integrado: retorna datasets anuais de PLD.
+
+        Prioriza arquivos locais `data/ccee_pld_{ano}_*.csv`. Se não houver,
+        faz fallback para `collect_pld_data` e devolve datasets por ano em memória.
+        """
+        import glob
+        import os
+
+        datasets: List[Dict[str, Any]] = []
+
+        files = sorted(glob.glob(os.path.join("data", "ccee_pld_*.csv")))
+        for f in files:
+            base = os.path.basename(f)
+            parts = base.split("_")
+            year = None
+            for part in parts:
+                if part.isdigit() and len(part) == 4:
+                    year = int(part)
+                    break
+            if year is None:
+                continue
+            datasets.append({"year": year, "file": f})
+
+        if datasets:
+            return {
+                "metadata": {
+                    "source": "CCEE_PLD",
+                    "status": "success",
+                    "datasets_collected": len(datasets),
+                    "collection_time": datetime.now().isoformat(),
+                },
+                "datasets": datasets,
+            }
+
+        # fallback API
+        pld_data = self.collect_pld_data(days=90)
+        records = pld_data.get("data", []) if isinstance(pld_data, dict) else []
+        if not records:
+            return {
+                "metadata": {
+                    "source": "CCEE_PLD",
+                    "status": "error",
+                    "datasets_collected": 0,
+                    "collection_time": datetime.now().isoformat(),
+                },
+                "datasets": [],
+            }
+
+        df = pd.DataFrame(records)
+        if "mes_referencia" in df.columns:
+            df["year"] = pd.to_numeric(df["mes_referencia"], errors="coerce").astype("Int64").astype(str).str[:4]
+        elif "MES_REFERENCIA" in df.columns:
+            df["year"] = pd.to_numeric(df["MES_REFERENCIA"], errors="coerce").astype("Int64").astype(str).str[:4]
+        else:
+            df["year"] = datetime.now().strftime("%Y")
+
+        datasets = []
+        for y, g in df.groupby("year"):
+            datasets.append({"year": int(y), "records": g.to_dict(orient="records")})
+
+        return {
+            "metadata": {
+                "source": "CCEE_PLD",
+                "status": "success",
+                "datasets_collected": len(datasets),
+                "collection_time": datetime.now().isoformat(),
+            },
+            "datasets": datasets,
+        }
 
     def collect_open_data_csv(self, limit: int = 500) -> Dict[str, Dict[str, Any]]:
         """Coleta datasets adicionais via links CSV (open data)."""
