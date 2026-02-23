@@ -57,7 +57,19 @@ def _duckdb_table_exists(con: Any, table_name: str) -> bool:
         return False
 
 def _duckdb_num_expr(col: str) -> str:
-    return f"TRY_CAST(REPLACE(REPLACE(TRIM(CAST({col} AS VARCHAR)), '.', ''), ',', '.') AS DOUBLE)"
+    """
+    Conversão numérica tolerante a formatos PT-BR e EN:
+    - '1.234,56' -> 1234.56
+    - '1234.56'   -> 1234.56
+    - '0,00E+00'  -> 0.0
+    """
+    raw = f"TRIM(CAST({col} AS VARCHAR))"
+    normalized = (
+        f"CASE WHEN INSTR({raw}, ',') > 0 "
+        f"THEN REPLACE(REPLACE({raw}, '.', ''), ',', '.') "
+        f"ELSE {raw} END"
+    )
+    return f"TRY_CAST({normalized} AS DOUBLE)"
 
 def _duckdb_date_expr(col: str) -> str:
     return (
@@ -357,86 +369,108 @@ def _compute_curtailment_from_csv(
 ) -> Dict[str, Any]:
     table_name = re.sub(r"[^a-z0-9_]", "", dataset_name.lower())
 
+    def _finalize(df: pd.DataFrame) -> Dict[str, Any]:
+        if df.empty:
+            return {"status": "indisponível"}
+
+        df = df.dropna(subset=["din_instante", "curtailment_abs"]) 
+        df = df[df["curtailment_abs"] >= 0]
+        if df.empty:
+            return {"status": "indisponível"}
+
+        serie = df.groupby("din_instante")["curtailment_abs"].sum().sort_index()
+        total_curtail = float(df["curtailment_abs"].sum())
+
+        disponivel_total = float(pd.to_numeric(df.get("disponivel", pd.Series(dtype=float)), errors="coerce").dropna().sum()) if "disponivel" in df.columns else 0.0
+        verificada_total = float(pd.to_numeric(df.get("verificada", pd.Series(dtype=float)), errors="coerce").dropna().sum()) if "verificada" in df.columns else 0.0
+
+        # Breakdown por código da restrição (quando disponível)
+        restricao_por_codigo = {}
+        if "cod_razaorestricao" in df.columns:
+            dfr = df.copy()
+            dfr["cod_razaorestricao"] = dfr["cod_razaorestricao"].astype(str).str.strip().str.upper()
+            dfr = dfr[dfr["cod_razaorestricao"].notna() & (dfr["cod_razaorestricao"] != "")]
+            if not dfr.empty:
+                grp = dfr.groupby("cod_razaorestricao", as_index=False)["curtailment_abs"].sum()
+                restricao_por_codigo = {str(r["cod_razaorestricao"]): float(r["curtailment_abs"]) for _, r in grp.iterrows()}
+
+        return {
+            "status": "disponível",
+            "curtailment_total_mwh": total_curtail,
+            "curtailment_total_mwmes": total_curtail,
+            "geracao_disponivel_total_mwh": disponivel_total,
+            "geracao_realizada_total_mwh": verificada_total,
+            "geracao_verificada_total_mwmes": verificada_total,
+            "curtailment_pct_total": float(total_curtail / disponivel_total) if disponivel_total > 0 else None,
+            "curtailment_medio_hora": float(serie.mean()) if not serie.empty else 0,
+            "curtailment_max_hora": float(serie.max()) if not serie.empty else 0,
+            "restricao_por_codigo_mwmes": restricao_por_codigo,
+            "serie": serie.reset_index().rename(columns={"din_instante": "instante", "curtailment_abs": "valor"}).to_dict("records"),
+        }
+
     # Prioridade: DuckDB
     con = _duckdb_connect()
     if con is not None and _duckdb_table_exists(con, table_name):
         try:
+            cols_info = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+            cols = {str(c[1]).lower(): str(c[1]) for c in cols_info}
+
+            has_limitada = "val_geracaolimitada" in cols
+            has_geracao = "val_geracao" in cols
+            has_disp = "val_disponibilidade" in cols
+            has_ref_final = "val_geracaoreferenciafinal" in cols
+            has_ref = "val_geracaoreferencia" in cols
+            has_est = col_estimada.lower() in cols
+            has_ver = col_verificada.lower() in cols
+            has_cod = "cod_razaorestricao" in cols
+
             flag_filter = ""
-            if col_flag_invalido:
-                flag_filter = f" AND COALESCE(TRY_CAST({col_flag_invalido} AS BOOLEAN), FALSE) = FALSE"
+            if col_flag_invalido and col_flag_invalido.lower() in cols:
+                flag_filter = f" AND COALESCE(TRY_CAST({cols[col_flag_invalido.lower()]} AS BOOLEAN), FALSE) = FALSE"
+
+            # Curto-circuito: layout novo (tm) prioriza val_geracaolimitada como curtailment
+            if has_limitada:
+                curta_expr = _duckdb_num_expr(cols["val_geracaolimitada"])
+                if has_disp:
+                    disp_expr = _duckdb_num_expr(cols["val_disponibilidade"])
+                elif has_ref_final:
+                    disp_expr = _duckdb_num_expr(cols["val_geracaoreferenciafinal"])
+                elif has_ref:
+                    disp_expr = _duckdb_num_expr(cols["val_geracaoreferencia"])
+                elif has_geracao:
+                    disp_expr = f"COALESCE({_duckdb_num_expr(cols['val_geracao'])},0) + COALESCE({_duckdb_num_expr(cols['val_geracaolimitada'])},0)"
+                else:
+                    disp_expr = "NULL"
+                ver_expr = _duckdb_num_expr(cols["val_geracao"]) if has_geracao else ( _duckdb_num_expr(cols[col_verificada.lower()]) if has_ver else "NULL")
+            else:
+                # Layout antigo detail_tm
+                if not (has_est and has_ver):
+                    return {"status": "indisponível"}
+                curta_expr = f"GREATEST(COALESCE({_duckdb_num_expr(cols[col_estimada.lower()])},0) - COALESCE({_duckdb_num_expr(cols[col_verificada.lower()])},0), 0)"
+                disp_expr = _duckdb_num_expr(cols[col_estimada.lower()])
+                ver_expr = _duckdb_num_expr(cols[col_verificada.lower()])
+
+            cod_select = f", TRIM(CAST({cols['cod_razaorestricao']} AS VARCHAR)) AS cod_razaorestricao" if has_cod else ""
 
             q = f"""
                 SELECT
-                    {_duckdb_date_expr('din_instante')} AS din_instante,
-                    {_duckdb_num_expr(col_estimada)} AS estimada,
-                    {_duckdb_num_expr(col_verificada)} AS verificada
+                    {_duckdb_date_expr(cols.get('din_instante','din_instante'))} AS din_instante,
+                    {curta_expr} AS curtailment_abs,
+                    {disp_expr} AS disponivel,
+                    {ver_expr} AS verificada
+                    {cod_select}
                 FROM {table_name}
-                WHERE {_duckdb_date_expr('din_instante')} IS NOT NULL
+                WHERE {_duckdb_date_expr(cols.get('din_instante','din_instante'))} IS NOT NULL
                 {flag_filter}
             """
             df = con.execute(q).fetchdf()
-            if df.empty:
-                return {"status": "indisponível"}
-
-            df = df.dropna(subset=["din_instante", "estimada", "verificada"])
-            df = df[(df["estimada"] > 0)]
-            if df.empty:
-                return {"status": "indisponível"}
-
-            df["curtailment_abs"] = (df["estimada"] - df["verificada"]).clip(lower=0)
-            serie = df.groupby("din_instante")["curtailment_abs"].sum().sort_index()
-            return {
-                "status": "disponível",
-                "curtailment_total_mwh": float(df["curtailment_abs"].sum()),
-                "geracao_disponivel_total_mwh": float(df["estimada"].sum()),
-                "geracao_realizada_total_mwh": float(df["verificada"].sum()),
-                "curtailment_pct_total": float(df["curtailment_abs"].sum() / df["estimada"].sum()) if float(df["estimada"].sum()) > 0 else None,
-                "curtailment_medio_hora": float(serie.mean()) if not serie.empty else 0,
-                "curtailment_max_hora": float(serie.max()) if not serie.empty else 0,
-                "serie": serie.reset_index().rename(columns={"din_instante": "instante", "curtailment_abs": "valor"}).to_dict("records"),
-            }
+            return _finalize(df)
         except Exception:
             pass
         finally:
             con.close()
 
-    # Fallback CSV apenas se necessário
-    file = _find_ons_csv(ons, dataset_name)
-    if not file or not os.path.exists(file):
-        return {"status": "indisponível"}
-
-    try:
-        df = pd.read_csv(file, sep=None, engine="python")
-        if "din_instante" not in df.columns:
-            return {"status": "indisponível"}
-
-        df["din_instante"] = _parse_date_series(df["din_instante"])
-        df = df.dropna(subset=["din_instante"])
-
-        if col_flag_invalido and col_flag_invalido in df.columns:
-            df = df[df[col_flag_invalido] == False]
-
-        df[col_estimada] = _normalize_br_numeric_series(df[col_estimada])
-        df[col_verificada] = _normalize_br_numeric_series(df[col_verificada])
-        df = df[(df[col_estimada] > 0) & df[col_estimada].notna() & df[col_verificada].notna()]
-        if df.empty:
-            return {"status": "indisponível"}
-
-        df["curtailment_abs"] = (df[col_estimada] - df[col_verificada]).clip(lower=0)
-        serie = df.groupby("din_instante")["curtailment_abs"].sum().sort_index()
-
-        return {
-            "status": "disponível",
-            "curtailment_total_mwh": float(df["curtailment_abs"].sum()),
-            "geracao_disponivel_total_mwh": float(df[col_estimada].sum()),
-            "geracao_realizada_total_mwh": float(df[col_verificada].sum()),
-            "curtailment_pct_total": float(df["curtailment_abs"].sum() / df[col_estimada].sum()) if float(df[col_estimada].sum()) > 0 else None,
-            "curtailment_medio_hora": float(serie.mean()) if not serie.empty else 0,
-            "curtailment_max_hora": float(serie.max()) if not serie.empty else 0,
-            "serie": serie.reset_index().rename(columns={"din_instante": "instante", "curtailment_abs": "valor"}).to_dict("records"),
-        }
-    except Exception:
-        return {"status": "erro"}
+    return {"status": "indisponível"}
 
 
 def _compute_renewable_curtailment(ons: Dict[str, Any]) -> Dict[str, Any]:
@@ -714,6 +748,54 @@ def _load_gfom_hourly_by_submarket(ons: Dict[str, Any]) -> Dict[str, pd.DataFram
         con.close()
 
 
+def _load_capacidade_instalada_ativa_por_fonte(ons: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Soma de val_potenciaefetiva (MW) por tipo de usina considerando apenas usinas ativas
+    (dat_desativacao nula/vazia) na tabela capacidade_instalada.
+    """
+    if duckdb is None:
+        return {}
+    con = _duckdb_connect()
+    if con is None or not _duckdb_table_exists(con, "capacidade_instalada"):
+        if con is not None:
+            con.close()
+        return {}
+    try:
+        q = f"""
+            SELECT
+                UPPER(TRIM(CAST(nom_tipousina AS VARCHAR))) AS tipousina,
+                SUM({_duckdb_num_expr('val_potenciaefetiva')}) AS potencia_mw
+            FROM capacidade_instalada
+            WHERE COALESCE(TRIM(CAST(dat_desativacao AS VARCHAR)), '') = ''
+            GROUP BY 1
+            HAVING potencia_mw IS NOT NULL
+        """
+        df = con.execute(q).fetchdf()
+        if df.empty:
+            return {}
+        out = {}
+        for _, r in df.iterrows():
+            t = str(r['tipousina']).upper()
+            if 'HIDRO' in t:
+                k = 'HIDROELETRICA'
+            elif 'TERM' in t:
+                k = 'TERMICA'
+            elif 'EOL' in t:
+                k = 'EOLIELETRICA'
+            elif 'FOTOV' in t or 'SOLAR' in t:
+                k = 'FOTOVOLTAICA'
+            elif 'NUCL' in t:
+                k = 'NUCLEAR'
+            else:
+                continue
+            out[k] = float(out.get(k, 0.0) + (r['potencia_mw'] if pd.notna(r['potencia_mw']) else 0.0))
+        return out
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
 def _load_disponibilidade_horaria(ons: Dict[str, Any]) -> pd.Series:
     if duckdb is None:
         return pd.Series(dtype=float)
@@ -758,7 +840,7 @@ def _load_ear_ena_monthly_by_submercado(ons: Dict[str, Any]) -> Tuple[Dict[str, 
                 SELECT
                     DATE_TRUNC('month', {_duckdb_date_expr('ear_data')}) AS mes,
                     UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS submercado_raw,
-                    AVG({_duckdb_num_expr('ear_verif_subsistema_percentual')}) AS valor
+                    AVG({_duckdb_num_expr('ear_verif_subsistema_mwmes')}) AS valor
                 FROM ear_diario_subsistema
                 GROUP BY 1,2
                 HAVING mes IS NOT NULL AND valor IS NOT NULL
@@ -776,7 +858,7 @@ def _load_ear_ena_monthly_by_submercado(ons: Dict[str, Any]) -> Tuple[Dict[str, 
                 SELECT
                     DATE_TRUNC('month', {_duckdb_date_expr('ena_data')}) AS mes,
                     UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS submercado_raw,
-                    AVG(COALESCE({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}, {_duckdb_num_expr('ena_bruta_regiao_mwmed')})) AS valor
+                    AVG({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}) AS valor
                 FROM ena_diario_subsistema
                 GROUP BY 1,2
                 HAVING mes IS NOT NULL AND valor IS NOT NULL
@@ -913,6 +995,7 @@ def _compute_advanced_cross_metrics(
             dependencia_termica_pct = float((total_termica_gfom / float(geracao_total.sum())) * 100)
 
     margem_oferta = _compute_effective_availability_margin(ons, carga_sin)
+    capacidade_instalada_ativa_por_fonte = _load_capacidade_instalada_ativa_por_fonte(ons)
 
     # Capacidade disponível real / margem operativa real / stress operacional
     capacidade_disp_h = _load_disponibilidade_horaria(ons)
@@ -968,6 +1051,8 @@ def _compute_advanced_cross_metrics(
     ena_media_mensal = None
     ear_media_diaria = None
     ena_media_diaria = None
+    ear_low_thr = None
+    ear_high_thr = None
     matriz_cenario_mensal: List[Dict[str, Any]] = []
     matriz_cenario_diaria: List[Dict[str, Any]] = []
     try:
@@ -1002,7 +1087,7 @@ def _compute_advanced_cross_metrics(
                 if _duckdb_table_exists(con, "ear_diario_subsistema"):
                     q_ear_d = f"""
                         SELECT DATE_TRUNC('day', {_duckdb_date_expr('ear_data')}) AS dia,
-                               AVG({_duckdb_num_expr('ear_verif_subsistema_percentual')}) AS ear_val
+                               AVG({_duckdb_num_expr('ear_verif_subsistema_mwmes')}) AS ear_val
                         FROM ear_diario_subsistema
                         GROUP BY 1
                         HAVING dia IS NOT NULL AND ear_val IS NOT NULL
@@ -1018,7 +1103,7 @@ def _compute_advanced_cross_metrics(
                 if _duckdb_table_exists(con, "ena_diario_subsistema"):
                     q_ena_d = f"""
                         SELECT DATE_TRUNC('day', {_duckdb_date_expr('ena_data')}) AS dia,
-                               AVG(COALESCE({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}, {_duckdb_num_expr('ena_bruta_regiao_mwmed')})) AS ena_val
+                               AVG({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}) AS ena_val
                         FROM ena_diario_subsistema
                         GROUP BY 1
                         HAVING dia IS NOT NULL AND ena_val IS NOT NULL
@@ -1038,6 +1123,10 @@ def _compute_advanced_cross_metrics(
         pld_m_global = _ensure_tz_naive_index(pld_series).resample("ME").mean()
         carga_liquida_m = _ensure_tz_naive_index(carga_liquida).resample("ME").mean() if not carga_liquida.empty else pd.Series(dtype=float)
         termica_pct_m = (pd.DataFrame({"termica": termica, "total": geracao_total}).dropna().query("total > 0").eval("(termica/total)*100").resample("ME").mean() if (not termica.empty and not geracao_total.empty) else pd.Series(dtype=float))
+
+        ear_vals = pd.Series(list((ear_media_mensal or {}).values()), dtype=float).dropna()
+        ear_low_thr = float(ear_vals.quantile(0.25)) if not ear_vals.empty else None
+        ear_high_thr = float(ear_vals.quantile(0.75)) if not ear_vals.empty else None
 
         idx = pld_m_global.index
         for extra in [
@@ -1060,11 +1149,15 @@ def _compute_advanced_cross_metrics(
             carga_v = float(carga_liquida_m.get(month)) if month in carga_liquida_m.index and pd.notna(carga_liquida_m.get(month)) else None
             term_v = float(termica_pct_m.get(month)) if month in termica_pct_m.index and pd.notna(termica_pct_m.get(month)) else None
 
+            if pld_v is None and carga_v is None and term_v is None:
+                # Evita meses antigos apenas hidrológicos (sem PLD/carga/operação)
+                continue
+
             if pld_v is None or ear_v is None:
                 cenario = "dados_insuficientes"
-            elif pld_v >= PLD_TETO_ESTRUTURAL * 0.8 and ear_v < 50:
+            elif pld_v >= PLD_TETO_ESTRUTURAL * 0.8 and ear_low_thr is not None and ear_v < ear_low_thr:
                 cenario = "estresse_hidrico"
-            elif pld_v <= PLD_PISO * 1.2 and ear_v > 65:
+            elif pld_v <= PLD_PISO * 1.2 and ear_high_thr is not None and ear_v > ear_high_thr:
                 cenario = "abundancia_hidrica"
             elif term_v is not None and term_v > 25 and pld_medio is not None and pld_v > pld_medio:
                 cenario = "pressao_termica"
@@ -1117,9 +1210,9 @@ def _compute_advanced_cross_metrics(
     corr_curtail_ear = None
     classificacao_curtail_ear = "indisponível"
     if ear_medio is not None:
-        if ear_medio > 70 and curtailment.get("total_mwh", 0) > 0:
+        if ear_high_thr is not None and ear_medio > ear_high_thr and curtailment.get("total_mwh", 0) > 0:
             classificacao_curtail_ear = "estrutural"
-        elif ear_medio < 50 and curtailment.get("total_mwh", 0) > 0:
+        elif ear_low_thr is not None and ear_medio < ear_low_thr and curtailment.get("total_mwh", 0) > 0:
             classificacao_curtail_ear = "restricao_local"
         else:
             classificacao_curtail_ear = "indeterminado"
@@ -1334,6 +1427,10 @@ def _compute_advanced_cross_metrics(
             ctv = curtailment_d.get(d)
             earv = ear_daily.get(d)
 
+            if all((x is None or pd.isna(x)) for x in [pldv, gpv, gcv, stv, ipv, isv]) and (earv is not None and not pd.isna(earv)):
+                # Evita dias sem sinais operacionais/econômicos (apenas EAR histórico)
+                continue
+
             if ctv is None or pd.isna(ctv) or ctv <= 0:
                 curt_state = "inexistente"
             elif intercambio_saturado:
@@ -1345,7 +1442,7 @@ def _compute_advanced_cross_metrics(
 
             abund = None
             if tdv is not None and not pd.isna(tdv) and earv is not None and not pd.isna(earv) and pldv is not None and not pd.isna(pldv):
-                abund = bool(tdv < 15 and earv > 70 and pldv <= PLD_PISO * 1.15)
+                abund = bool(tdv < 15 and (ear_high_thr is not None and earv > ear_high_thr) and pldv <= PLD_PISO * 1.15)
 
             matriz_cenario_diaria.append({
                 "dia": pd.Timestamp(d).strftime("%Y-%m-%d"),
@@ -1445,6 +1542,7 @@ def _compute_advanced_cross_metrics(
             "margem_operativa_p5_mensal": margem_operativa_p5_mensal,
             "stress_operacional_medio": stress_operacional_medio,
             "stress_operacional_horario": stress_operacional_horario,
+            "capacidade_instalada_ativa_por_fonte_mw": capacidade_instalada_ativa_por_fonte,
             "tendencia_estrutural_mensal": tendencia_estrutural_mensal,
         },
         "indices_renovaveis": {
@@ -1891,7 +1989,7 @@ def calcular_indicadores_termicos_revisados(
 
 
 def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
-    """Retorna série semanal média de CVU por dat_fimsemana (consolidando múltiplos arquivos)."""
+    """Retorna série semanal de CVU por dat_fimsemana (somatório semanal de val_cvu)."""
     con = _duckdb_connect()
     if con is not None:
         try:
@@ -1899,7 +1997,7 @@ def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
                 q = f"""
                     SELECT
                         {_duckdb_date_expr('dat_fimsemana')} AS dat_fimsemana,
-                        AVG({_duckdb_num_expr('val_cvu')}) AS val_cvu
+                        SUM({_duckdb_num_expr('val_cvu')}) AS val_cvu
                     FROM cvu_usina_termica
                     GROUP BY 1
                     HAVING dat_fimsemana IS NOT NULL AND val_cvu > 0
@@ -1942,7 +2040,7 @@ def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
     all_df = pd.concat(frames, ignore_index=True)
     weekly = (
         all_df.groupby(["dat_iniciosemana", "dat_fimsemana"], as_index=False)["val_cvu"]
-        .mean()
+        .sum()
         .sort_values("dat_fimsemana")
     )
     if weekly.empty:
@@ -1960,7 +2058,7 @@ def _expand_cvu_weekly_to_daily(ons: Dict[str, Any]) -> pd.Series:
                     SELECT
                         {_duckdb_date_expr('dat_iniciosemana')} AS dat_iniciosemana,
                         {_duckdb_date_expr('dat_fimsemana')} AS dat_fimsemana,
-                        AVG({_duckdb_num_expr('val_cvu')}) AS val_cvu
+                        SUM({_duckdb_num_expr('val_cvu')}) AS val_cvu
                     FROM cvu_usina_termica
                     GROUP BY 1,2
                     HAVING dat_iniciosemana IS NOT NULL AND dat_fimsemana IS NOT NULL AND val_cvu > 0
@@ -2010,7 +2108,7 @@ def _expand_cvu_weekly_to_daily(ons: Dict[str, Any]) -> pd.Series:
     wk = (
         pd.concat(frames, ignore_index=True)
         .groupby(["dat_iniciosemana", "dat_fimsemana"], as_index=False)["val_cvu"]
-        .mean()
+        .sum()
     )
     daily_vals: Dict[pd.Timestamp, float] = {}
     for _, r in wk.iterrows():

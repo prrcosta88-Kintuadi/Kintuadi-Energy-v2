@@ -241,16 +241,16 @@ class ONSCollectorV2:
                 dynamic.append((
                     f"Restricao_fotovoltaica_{m}",
                     f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
-                    f"dataset/restricao_coff_fotovoltaica_detail_tm/"
-                    f"RESTRICAO_COFF_FOTOVOLTAICA_DETAIL_{year}_{month}.xlsx"
+                    f"dataset/restricao_coff_fotovoltaica_tm/"
+                    f"RESTRICAO_COFF_FOTOVOLTAICA_{year}_{month}.xlsx"
                 ))
 
             # Restrição Eólica
             dynamic.append((
                 f"Restricao_eolica_{m}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
-                f"dataset/restricao_coff_eolica_detail_tm/"
-                f"RESTRICAO_COFF_EOLICA_DETAIL_{year}_{month}.xlsx"
+                f"dataset/restricao_coff_eolica_tm/"
+                f"RESTRICAO_COFF_EOLICA_{year}_{month}.xlsx"
             ))
 
         # Geração por usina (mensal: 2022-01 → atual)
