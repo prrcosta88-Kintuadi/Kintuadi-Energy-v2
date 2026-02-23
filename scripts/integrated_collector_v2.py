@@ -115,6 +115,7 @@ class KintuadiIntegratedCollectorV2:
                     """,
                     [file_path],
                 )
+<<<<<<< codex/verify-metrics-in-core_analysis.py-sz05tl
 
             for stmt in [
                 f"ALTER TABLE {table_name} ADD COLUMN ano INTEGER",
@@ -245,6 +246,125 @@ class KintuadiIntegratedCollectorV2:
                 except Exception:
                     pass
 
+=======
+
+            for stmt in [
+                f"ALTER TABLE {table_name} ADD COLUMN ano INTEGER",
+                f"ALTER TABLE {table_name} ADD COLUMN mes INTEGER",
+            ]:
+                try:
+                    con.execute(stmt)
+                except Exception:
+                    pass
+
+            if month is not None:
+                # Para séries que migraram de anual para mensal (ex.: GFOM),
+                # remover também restos anuais (mes IS NULL) do mesmo ano.
+                if table_name in {"despacho_gfom"}:
+                    con.execute(
+                        f"DELETE FROM {table_name} WHERE ano=? AND (mes=? OR mes IS NULL)",
+                        [year, month],
+                    )
+                else:
+                    con.execute(f"DELETE FROM {table_name} WHERE ano=? AND mes=?", [year, month])
+            else:
+                con.execute(f"DELETE FROM {table_name} WHERE ano=?", [year])
+
+            cols = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+            col_names = [c[1] for c in cols if c[1] not in ("ano", "mes")]
+            col_list = ", ".join([f'"{c}"' for c in col_names])
+
+            if is_xlsx:
+                # XLSX já está registrado como df_src_tmp
+                if month is not None:
+                    con.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        ({col_list}, ano, mes)
+                        SELECT {col_list}, ?, ?
+                        FROM df_src_tmp
+                        """,
+                        [year, month],
+                    )
+                else:
+                    con.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        ({col_list}, ano, mes)
+                        SELECT {col_list}, ?, NULL
+                        FROM df_src_tmp
+                        """,
+                        [year],
+                    )
+            else:
+                # CSV com schema variável (ex.: GFOM anual vs mensal):
+                # criar staging e alinhar colunas por nome para evitar BinderError.
+                con.execute(
+                    """
+                    CREATE OR REPLACE TEMP TABLE _src_csv_tmp AS
+                    SELECT * FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
+                    """,
+                    [file_path],
+                )
+
+                src_info = con.execute("PRAGMA table_info('_src_csv_tmp')").fetchall()
+                src_cols = {c[1] for c in src_info}
+
+                select_expr = []
+                for col in col_names:
+                    if col in src_cols:
+                        select_expr.append(f'"{col}"')
+                    else:
+                        select_expr.append(f'NULL AS "{col}"')
+
+                select_cols = ", ".join(select_expr)
+
+                if month is not None:
+                    con.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        ({col_list}, ano, mes)
+                        SELECT {select_cols}, ?, ?
+                        FROM _src_csv_tmp
+                        """,
+                        [year, month],
+                    )
+                else:
+                    con.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        ({col_list}, ano, mes)
+                        SELECT {select_cols}, ?, NULL
+                        FROM _src_csv_tmp
+                        """,
+                        [year],
+                    )
+
+        except Exception as e:
+            logger.error(f"Erro ao persistir {dataset_name} no DuckDB: {e}")
+        finally:
+            con.close()
+
+    def _persist_pld_duckdb(self, df: pd.DataFrame, year: int):
+        if duckdb is None:
+            return
+
+        con = duckdb.connect(self.db_path)
+        try:
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pld_historical (
+                    data TIMESTAMP,
+                    submercado VARCHAR,
+                    pld DOUBLE,
+                    ano INTEGER,
+                    mes INTEGER,
+                    hora INTEGER
+                )
+                """
+            )
+
+>>>>>>> main
             dfx = df.copy()
             dfx.columns = [str(c).lower() for c in dfx.columns]
 
@@ -276,6 +396,7 @@ class KintuadiIntegratedCollectorV2:
             else:
                 dfx["submercado"] = None
 
+<<<<<<< codex/verify-metrics-in-core_analysis.py-sz05tl
             # Campos de granularidade original da CCEE
             if "dia" in dfx.columns:
                 dfx["dia"] = pd.to_numeric(dfx["dia"], errors="coerce")
@@ -292,6 +413,8 @@ class KintuadiIntegratedCollectorV2:
             else:
                 dfx["periodo_comercializacao"] = None
 
+=======
+>>>>>>> main
             dfx = dfx.dropna(subset=["data", "submercado", "pld"])
             if dfx.empty:
                 return
@@ -305,8 +428,12 @@ class KintuadiIntegratedCollectorV2:
             con.execute(
                 """
                 INSERT INTO pld_historical
+<<<<<<< codex/verify-metrics-in-core_analysis.py-sz05tl
                 SELECT data, submercado, CAST(pld AS DOUBLE), ano, mes, hora,
                        CAST(dia AS INTEGER), CAST(mes_referencia AS INTEGER), CAST(periodo_comercializacao AS INTEGER)
+=======
+                SELECT data, submercado, CAST(pld AS DOUBLE), ano, mes, hora
+>>>>>>> main
                 FROM df_temp
                 """
             )

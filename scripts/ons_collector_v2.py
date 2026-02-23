@@ -296,7 +296,11 @@ class ONSCollectorV2:
         for name, url in self.OPEN_DATASETS:
             try:
                 logger.info(f"ONS | OpenData | {name}")
+<<<<<<< codex/verify-metrics-in-core_analysis.py-sz05tl
                 path, rows = self._fetch_and_save_open_data(url, name)
+=======
+                path, rows = self._fetch_and_save_csv(url, name)
+>>>>>>> main
                 if not path:
                     continue
 
