@@ -2199,10 +2199,39 @@ def _core_log(stage: str, message: str, **context: Any) -> None:
         pass
 
 
-def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> Dict[str, Any]:
+def _try_load_fresh_core_cache(output_dir: str = "data") -> Optional[Dict[str, Any]]:
+    """Retorna core já persistido quando está sincronizado com o DuckDB (atalho de performance)."""
+    try:
+        final_path = os.path.join(output_dir, "core_analysis_latest.json")
+        if not os.path.exists(final_path) or not os.path.exists(_DUCKDB_PATH):
+            return None
+
+        with open(final_path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if not isinstance(cached, dict):
+            return None
+
+        core_mtime = os.path.getmtime(final_path)
+        db_mtime = os.path.getmtime(_DUCKDB_PATH)
+
+        # Se o DB não mudou desde a geração do core, reaproveita.
+        if core_mtime >= db_mtime:
+            return cached
+    except Exception:
+        return None
+    return None
+
+
+def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data", force_rebuild: bool = False) -> Dict[str, Any]:
     _core_log("START", "Entrou no build_core_analysis", output_dir=output_dir)
     if duckdb is None or not os.path.exists(_DUCKDB_PATH):
         raise RuntimeError("DuckDB obrigatório para build_core_analysis no modo atual.")
+
+    if not force_rebuild:
+        cached = _try_load_fresh_core_cache(output_dir=output_dir)
+        if isinstance(cached, dict):
+            _core_log("CACHE", "core_analysis_latest.json reaproveitado (DB inalterado)")
+            return cached
 
     sources = _extract_sources(raw_data)
     ons = sources["ons"]
@@ -2371,7 +2400,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     carga_sin_series = pd.Series(dtype=float)
     geracao_hidro_sin_series = pd.Series(dtype=float)
 
-    if pld_records and not df_pld.empty:
+    if not df_pld.empty:
         pld_series = _ensure_tz_naive_index(
             df_pld
             .sort_values("timestamp")
@@ -2534,6 +2563,8 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
             "correcao_conceitual": True,  # Sinaliza que CVU alto vs PLD baixo = FOLGA
             "perspectivas_incluidas": ["sistema_modicidade", "gerador_viabilidade"],
             "generated_at": datetime.now().isoformat(),
+            "duckdb_path": _DUCKDB_PATH,
+            "duckdb_mtime": datetime.fromtimestamp(os.path.getmtime(_DUCKDB_PATH)).isoformat() if os.path.exists(_DUCKDB_PATH) else None,
         },
     }
 
