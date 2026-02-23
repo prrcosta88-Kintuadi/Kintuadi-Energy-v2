@@ -227,10 +227,23 @@ class KintuadiIntegratedCollectorV2:
                     pld DOUBLE,
                     ano INTEGER,
                     mes INTEGER,
-                    hora INTEGER
+                    hora INTEGER,
+                    dia INTEGER,
+                    mes_referencia INTEGER,
+                    periodo_comercializacao INTEGER
                 )
                 """
             )
+
+            for stmt in [
+                "ALTER TABLE pld_historical ADD COLUMN dia INTEGER",
+                "ALTER TABLE pld_historical ADD COLUMN mes_referencia INTEGER",
+                "ALTER TABLE pld_historical ADD COLUMN periodo_comercializacao INTEGER",
+            ]:
+                try:
+                    con.execute(stmt)
+                except Exception:
+                    pass
 
             dfx = df.copy()
             dfx.columns = [str(c).lower() for c in dfx.columns]
@@ -263,6 +276,22 @@ class KintuadiIntegratedCollectorV2:
             else:
                 dfx["submercado"] = None
 
+            # Campos de granularidade original da CCEE
+            if "dia" in dfx.columns:
+                dfx["dia"] = pd.to_numeric(dfx["dia"], errors="coerce")
+            else:
+                dfx["dia"] = pd.to_datetime(dfx["data"], errors="coerce").dt.day
+
+            if "mes_referencia" in dfx.columns:
+                dfx["mes_referencia"] = pd.to_numeric(dfx["mes_referencia"], errors="coerce")
+            else:
+                dfx["mes_referencia"] = pd.to_datetime(dfx["data"], errors="coerce").dt.strftime("%Y%m").astype(float)
+
+            if "periodo_comercializacao" in dfx.columns:
+                dfx["periodo_comercializacao"] = pd.to_numeric(dfx["periodo_comercializacao"], errors="coerce")
+            else:
+                dfx["periodo_comercializacao"] = None
+
             dfx = dfx.dropna(subset=["data", "submercado", "pld"])
             if dfx.empty:
                 return
@@ -276,7 +305,8 @@ class KintuadiIntegratedCollectorV2:
             con.execute(
                 """
                 INSERT INTO pld_historical
-                SELECT data, submercado, CAST(pld AS DOUBLE), ano, mes, hora
+                SELECT data, submercado, CAST(pld AS DOUBLE), ano, mes, hora,
+                       CAST(dia AS INTEGER), CAST(mes_referencia AS INTEGER), CAST(periodo_comercializacao AS INTEGER)
                 FROM df_temp
                 """
             )

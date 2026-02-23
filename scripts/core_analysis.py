@@ -2268,7 +2268,10 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data", forc
             pld AS pld_hora,
             ano,
             mes,
-            hora
+            hora,
+            dia,
+            mes_referencia,
+            periodo_comercializacao
         FROM pld_historical
         WHERE data IS NOT NULL AND pld IS NOT NULL
         ORDER BY data
@@ -2302,6 +2305,13 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data", forc
 
         # 4️⃣ Limpeza
         df_pld = df_pld.dropna(subset=["timestamp", "pld_hora"])
+
+
+        # Preenche granularidade CCEE quando ausente
+        if "dia" not in df_pld.columns or df_pld["dia"].isna().all():
+            df_pld["dia"] = pd.to_datetime(df_pld["timestamp"], errors="coerce").dt.day
+        if "mes_referencia" not in df_pld.columns or df_pld["mes_referencia"].isna().all():
+            df_pld["mes_referencia"] = pd.to_datetime(df_pld["timestamp"], errors="coerce").dt.strftime("%Y%m")
 
         if not df_pld.empty:
 
