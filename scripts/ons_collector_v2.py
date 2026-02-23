@@ -85,9 +85,9 @@ CARGA_AGORA_ENDPOINTS = [
 class ONSCollectorV2:
 
     OPEN_DATASETS: List[Tuple[str, str]] = [
-        ("Reservatorios", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/reservatorio/RESERVATORIOS.csv"),
-        ("Capacidade_Instalada", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/capacidade-geracao/CAPACIDADE_GERACAO.csv"),
-        ("Despacho_GFOM_2021", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/hist_despacho_energia/info2021.csv"),
+        ("Reservatorios", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/reservatorio/RESERVATORIOS.xlsx"),
+        ("Capacidade_Instalada", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/capacidade-geracao/CAPACIDADE_GERACAO.xlsx"),
+        ("Despacho_GFOM_2021", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/hist_despacho_energia/info2021.xlsx"),
     ]
 
     def __init__(
@@ -147,28 +147,28 @@ class ONSCollectorV2:
                 f"EAR_Diario_Reservatorios_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/ear_reservatorio_di/"
-                f"EAR_DIARIO_RESERVATORIOS_{year}.csv"
+                f"EAR_DIARIO_RESERVATORIOS_{year}.xlsx"
             ))
 
             dynamic.append((
                 f"ENA_Diario_Reservatorios_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/ena_reservatorio_di/"
-                f"ENA_DIARIO_RESERVATORIOS_{year}.csv"
+                f"ENA_DIARIO_RESERVATORIOS_{year}.xlsx"
             ))
 
             dynamic.append((
                 f"EAR_Diario_Subsistema_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/ear_subsistema_di/"
-                f"EAR_DIARIO_SUBSISTEMA_{year}.csv"
+                f"EAR_DIARIO_SUBSISTEMA_{year}.xlsx"
             ))
 
             dynamic.append((
                 f"ENA_Diario_Subsistema_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/ena_subsistema_di/"
-                f"ENA_DIARIO_SUBSISTEMA_{year}.csv"
+                f"ENA_DIARIO_SUBSISTEMA_{year}.xlsx"
             ))
 
         # ============================
@@ -183,7 +183,7 @@ class ONSCollectorV2:
                 f"CVU_Usina_Termica_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/cvu_usitermica_se/"
-                f"CVU_USINA_TERMICA_{year}.csv"
+                f"CVU_USINA_TERMICA_{year}.xlsx"
             ))
 
         # ============================
@@ -206,7 +206,7 @@ class ONSCollectorV2:
                 f"Geracao_Usina_Horaria_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/geracao_usina_2_ho/"
-                f"GERACAO_USINA-2_{year}.csv"
+                f"GERACAO_USINA-2_{year}.xlsx"
             ))
 
         return dynamic
@@ -226,7 +226,7 @@ class ONSCollectorV2:
                 f"Despacho_GFOM_{m}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/geracao_termica_despacho_2_ho/"
-                f"GERACAO_TERMICA_DESPACHO-2_{year}_{month}.csv"
+                f"GERACAO_TERMICA_DESPACHO-2_{year}_{month}.xlsx"
             ))
 
             # Disponibilidade
@@ -234,7 +234,7 @@ class ONSCollectorV2:
                 f"Disponibilidade_Usina_{m}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/disponibilidade_usina_ho/"
-                f"DISPONIBILIDADE_USINA_{year}_{month}.csv"
+                f"DISPONIBILIDADE_USINA_{year}_{month}.xlsx"
             ))
 
             # Restrição FV (disponível desde 2024-04)
@@ -243,7 +243,7 @@ class ONSCollectorV2:
                     f"Restricao_fotovoltaica_{m}",
                     f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                     f"dataset/restricao_coff_fotovoltaica_detail_tm/"
-                    f"RESTRICAO_COFF_FOTOVOLTAICA_DETAIL_{year}_{month}.csv"
+                    f"RESTRICAO_COFF_FOTOVOLTAICA_DETAIL_{year}_{month}.xlsx"
                 ))
 
             # Restrição Eólica
@@ -251,7 +251,7 @@ class ONSCollectorV2:
                 f"Restricao_eolica_{m}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/restricao_coff_eolica_detail_tm/"
-                f"RESTRICAO_COFF_EOLICA_DETAIL_{year}_{month}.csv"
+                f"RESTRICAO_COFF_EOLICA_DETAIL_{year}_{month}.xlsx"
             ))
 
         # Geração por usina (mensal: 2022-01 → atual)
@@ -262,7 +262,7 @@ class ONSCollectorV2:
                 f"Geracao_Usina_Horaria_{m}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/geracao_usina_2_ho/"
-                f"GERACAO_USINA-2_{year}_{month}.csv"
+                f"GERACAO_USINA-2_{year}_{month}.xlsx"
             ))
 
         return dynamic
