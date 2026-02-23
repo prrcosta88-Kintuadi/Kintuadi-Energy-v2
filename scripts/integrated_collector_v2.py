@@ -29,6 +29,11 @@ class KintuadiIntegratedCollectorV2:
 
     def __init__(self):
         self.db_path = "data/kintuadi.duckdb"
+
+        # Garantir diretórios antes de registrar FileHandler
+        os.makedirs("data", exist_ok=True)
+        os.makedirs("logs", exist_ok=True)
+
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(message)s",
@@ -37,9 +42,6 @@ class KintuadiIntegratedCollectorV2:
                 logging.FileHandler("logs/kintuadi.log"),
             ],
         )
-
-        os.makedirs("data", exist_ok=True)
-        os.makedirs("logs", exist_ok=True)
 
         try:
             from .ons_collector_v2 import ONSCollectorV2
@@ -140,8 +142,9 @@ class KintuadiIntegratedCollectorV2:
             col_names = [c[1] for c in cols if c[1] not in ("ano", "mes")]
             col_list = ", ".join([f'"{c}"' for c in col_names])
 
-            if month is not None:
-                if is_xlsx:
+            if is_xlsx:
+                # XLSX já está registrado como df_src_tmp
+                if month is not None:
                     con.execute(
                         f"""
                         INSERT INTO {table_name}
@@ -156,31 +159,53 @@ class KintuadiIntegratedCollectorV2:
                         f"""
                         INSERT INTO {table_name}
                         ({col_list}, ano, mes)
-                        SELECT {col_list}, ?, ?
-                        FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
-                        """,
-                        [year, month, file_path],
-                    )
-            else:
-                if is_xlsx:
-                    con.execute(
-                        f"""
-                        INSERT INTO {table_name}
-                        ({col_list}, ano, mes)
                         SELECT {col_list}, ?, NULL
                         FROM df_src_tmp
                         """,
                         [year],
+                    )
+            else:
+                # CSV com schema variável (ex.: GFOM anual vs mensal):
+                # criar staging e alinhar colunas por nome para evitar BinderError.
+                con.execute(
+                    """
+                    CREATE OR REPLACE TEMP TABLE _src_csv_tmp AS
+                    SELECT * FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
+                    """,
+                    [file_path],
+                )
+
+                src_info = con.execute("PRAGMA table_info('_src_csv_tmp')").fetchall()
+                src_cols = {c[1] for c in src_info}
+
+                select_expr = []
+                for col in col_names:
+                    if col in src_cols:
+                        select_expr.append(f'"{col}"')
+                    else:
+                        select_expr.append(f'NULL AS "{col}"')
+
+                select_cols = ", ".join(select_expr)
+
+                if month is not None:
+                    con.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        ({col_list}, ano, mes)
+                        SELECT {select_cols}, ?, ?
+                        FROM _src_csv_tmp
+                        """,
+                        [year, month],
                     )
                 else:
                     con.execute(
                         f"""
                         INSERT INTO {table_name}
                         ({col_list}, ano, mes)
-                        SELECT {col_list}, ?, NULL
-                        FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
+                        SELECT {select_cols}, ?, NULL
+                        FROM _src_csv_tmp
                         """,
-                        [year, file_path],
+                        [year],
                     )
 
         except Exception as e:
@@ -208,13 +233,43 @@ class KintuadiIntegratedCollectorV2:
             )
 
             dfx = df.copy()
-            dfx["data"] = pd.to_datetime(dfx["data"], errors="coerce")
-            dfx["ano"] = dfx["data"].dt.year
-            dfx["mes"] = dfx["data"].dt.month
-            dfx["hora"] = dfx["data"].dt.hour
+            dfx.columns = [str(c).lower() for c in dfx.columns]
+
+            # Normalização de layout CCEE (DIA,HORA,MES_REFERENCIA,PLD_HORA,SUBMERCADO)
+            if "data" not in dfx.columns:
+                if {"mes_referencia", "dia", "hora"}.issubset(dfx.columns):
+                    mr = pd.to_numeric(dfx["mes_referencia"], errors="coerce").astype("Int64").astype(str).str.zfill(6)
+                    dfx["data"] = pd.to_datetime(
+                        mr.str[:4]
+                        + "-"
+                        + mr.str[4:6]
+                        + "-"
+                        + pd.to_numeric(dfx["dia"], errors="coerce").fillna(1).astype(int).astype(str).str.zfill(2)
+                        + " "
+                        + pd.to_numeric(dfx["hora"], errors="coerce").fillna(0).astype(int).astype(str).str.zfill(2)
+                        + ":00:00",
+                        errors="coerce",
+                    )
+            else:
+                dfx["data"] = pd.to_datetime(dfx["data"], errors="coerce")
+
+            if "pld" not in dfx.columns and "pld_hora" in dfx.columns:
+                dfx["pld"] = pd.to_numeric(dfx["pld_hora"], errors="coerce")
+            else:
+                dfx["pld"] = pd.to_numeric(dfx.get("pld"), errors="coerce")
+
+            if "submercado" in dfx.columns:
+                dfx["submercado"] = dfx["submercado"].astype(str).str.upper().str.strip()
+            else:
+                dfx["submercado"] = None
+
             dfx = dfx.dropna(subset=["data", "submercado", "pld"])
             if dfx.empty:
                 return
+
+            dfx["ano"] = dfx["data"].dt.year
+            dfx["mes"] = dfx["data"].dt.month
+            dfx["hora"] = dfx["data"].dt.hour
 
             con.execute("DELETE FROM pld_historical WHERE ano = ?", [year])
             con.register("df_temp", dfx)
@@ -301,17 +356,39 @@ class KintuadiIntegratedCollectorV2:
             logger.info("[2/2] Coletando dados da CCEE...")
             ccee_data = {}
 
-            pld_hist = self.ccee_collector.collect_pld_historical()
+            # Compat: coletores antigos podem não ter collect_pld_historical
+            if hasattr(self.ccee_collector, "collect_pld_historical"):
+                pld_hist = self.ccee_collector.collect_pld_historical()
+            else:
+                logger.warning("CCEE collector sem collect_pld_historical; usando collect_pld_data como fallback.")
+                pld_hist = {"datasets": []}
+                pld_data = self.ccee_collector.collect_pld_data(days=90)
+                records = pld_data.get("data", []) if isinstance(pld_data, dict) else []
+                if records:
+                    df = pd.DataFrame(records)
+                    if "mes_referencia" in df.columns:
+                        df["year"] = pd.to_numeric(df["mes_referencia"], errors="coerce").astype("Int64").astype(str).str[:4]
+                    elif "MES_REFERENCIA" in df.columns:
+                        df["year"] = pd.to_numeric(df["MES_REFERENCIA"], errors="coerce").astype("Int64").astype(str).str[:4]
+                    else:
+                        df["year"] = datetime.now().strftime("%Y")
+                    for y, g in df.groupby("year"):
+                        pld_hist["datasets"].append({"year": int(y), "records": g.to_dict(orient="records")})
+
             if duckdb is not None:
                 for ds in pld_hist.get("datasets", []):
                     year = ds.get("year")
                     file_path = ds.get("file")
-                    if not file_path or not os.path.exists(file_path):
-                        continue
                     try:
-                        df_year = pd.read_csv(file_path)
+                        if file_path and os.path.exists(file_path):
+                            df_year = pd.read_csv(file_path)
+                        else:
+                            recs = ds.get("records") or ds.get("data") or ds.get("timeseries") or []
+                            df_year = pd.DataFrame(recs)
+                        if df_year.empty:
+                            continue
                         logger.info(f"Persistindo PLD {year} no DuckDB...")
-                        self._persist_pld_duckdb(df_year, year)
+                        self._persist_pld_duckdb(df_year, int(year) if year else datetime.now().year)
                     except Exception as e:
                         logger.warning(f"Falha ao persistir PLD {year}: {e}")
 
