@@ -237,13 +237,14 @@ class ONSCollectorV2:
                 f"DISPONIBILIDADE_USINA_{year}_{month}.csv"
             ))
 
-            # Restrição FV
-            dynamic.append((
-                f"Restricao_fotovoltaica_{m}",
-                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
-                f"dataset/restricao_coff_fotovoltaica_detail_tm/"
-                f"RESTRICAO_COFF_FOTOVOLTAICA_DETAIL_{year}_{month}.csv"
-            ))
+            # Restrição FV (disponível desde 2024-04)
+            if m >= "2024-04":
+                dynamic.append((
+                    f"Restricao_fotovoltaica_{m}",
+                    f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                    f"dataset/restricao_coff_fotovoltaica_detail_tm/"
+                    f"RESTRICAO_COFF_FOTOVOLTAICA_DETAIL_{year}_{month}.csv"
+                ))
 
             # Restrição Eólica
             dynamic.append((
@@ -295,24 +296,11 @@ class ONSCollectorV2:
         datasets = []
 
         for name, url in self.OPEN_DATASETS:
-
-            path, rows = self._fetch_and_save_csv(url, name)
-            
-            if not path:
-                continue
-
-            datasets.append({
-                "dataset": name,
-                "type": "csv",
-                "records": rows,
-                "file": path,
-                "origin": "open_data",
-            })
-
             try:
                 logger.info(f"ONS | OpenData | {name}")
-
                 path, rows = self._fetch_and_save_csv(url, name)
+                if not path:
+                    continue
 
                 datasets.append({
                     "dataset": name,
@@ -321,7 +309,6 @@ class ONSCollectorV2:
                     "file": path,
                     "origin": "open_data",
                 })
-
             except Exception as e:
                 logger.warning(f"Falha {name}: {e}")
 

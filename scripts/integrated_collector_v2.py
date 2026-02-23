@@ -89,15 +89,30 @@ class KintuadiIntegratedCollectorV2:
             table_name = self._sanitize_table_name(dataset_name)
             logger.info(f"Persistindo {dataset_name} -> {table_name} (ano={year}, mes={month})")
 
-            con.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {table_name} AS
-                SELECT *
-                FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
-                LIMIT 0
-                """,
-                [file_path],
-            )
+            is_xlsx = str(file_path).lower().endswith(".xlsx")
+
+            if is_xlsx:
+                # XLSX (ex.: Curva_Carga): usar pandas para inferência e insert robusto
+                df_src = pd.read_excel(file_path)
+                if df_src.empty:
+                    return
+                con.register("df_src_tmp", df_src)
+                con.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {table_name} AS
+                    SELECT * FROM df_src_tmp LIMIT 0
+                    """
+                )
+            else:
+                con.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {table_name} AS
+                    SELECT *
+                    FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
+                    LIMIT 0
+                    """,
+                    [file_path],
+                )
 
             for stmt in [
                 f"ALTER TABLE {table_name} ADD COLUMN ano INTEGER",
@@ -109,7 +124,15 @@ class KintuadiIntegratedCollectorV2:
                     pass
 
             if month is not None:
-                con.execute(f"DELETE FROM {table_name} WHERE ano=? AND mes=?", [year, month])
+                # Para séries que migraram de anual para mensal (ex.: GFOM),
+                # remover também restos anuais (mes IS NULL) do mesmo ano.
+                if table_name in {"despacho_gfom"}:
+                    con.execute(
+                        f"DELETE FROM {table_name} WHERE ano=? AND (mes=? OR mes IS NULL)",
+                        [year, month],
+                    )
+                else:
+                    con.execute(f"DELETE FROM {table_name} WHERE ano=? AND mes=?", [year, month])
             else:
                 con.execute(f"DELETE FROM {table_name} WHERE ano=?", [year])
 
@@ -118,25 +141,47 @@ class KintuadiIntegratedCollectorV2:
             col_list = ", ".join([f'"{c}"' for c in col_names])
 
             if month is not None:
-                con.execute(
-                    f"""
-                    INSERT INTO {table_name}
-                    ({col_list}, ano, mes)
-                    SELECT {col_list}, ?, ?
-                    FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
-                    """,
-                    [year, month, file_path],
-                )
+                if is_xlsx:
+                    con.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        ({col_list}, ano, mes)
+                        SELECT {col_list}, ?, ?
+                        FROM df_src_tmp
+                        """,
+                        [year, month],
+                    )
+                else:
+                    con.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        ({col_list}, ano, mes)
+                        SELECT {col_list}, ?, ?
+                        FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
+                        """,
+                        [year, month, file_path],
+                    )
             else:
-                con.execute(
-                    f"""
-                    INSERT INTO {table_name}
-                    ({col_list}, ano, mes)
-                    SELECT {col_list}, ?, NULL
-                    FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
-                    """,
-                    [year, file_path],
-                )
+                if is_xlsx:
+                    con.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        ({col_list}, ano, mes)
+                        SELECT {col_list}, ?, NULL
+                        FROM df_src_tmp
+                        """,
+                        [year],
+                    )
+                else:
+                    con.execute(
+                        f"""
+                        INSERT INTO {table_name}
+                        ({col_list}, ano, mes)
+                        SELECT {col_list}, ?, NULL
+                        FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
+                        """,
+                        [year, file_path],
+                    )
 
         except Exception as e:
             logger.error(f"Erro ao persistir {dataset_name} no DuckDB: {e}")
