@@ -14,9 +14,15 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
+import re
 
 import pandas as pd
 import numpy as np
+
+try:
+    import duckdb
+except Exception:
+    duckdb = None
 
 # =====================================================================
 # CONSTANTES REGULATÓRIAS - ANEEL/CCEE 2025
@@ -28,6 +34,55 @@ PLD_TETO_HORARIO = 1611.04  # R$/MWh (máximo horário)
 # =====================================================================
 # Utilities
 # =====================================================================
+
+
+
+_DUCKDB_PATH = os.path.join("data", "kintuadi.duckdb")
+
+def _duckdb_connect() -> Optional[Any]:
+    if duckdb is None:
+        return None
+    if not os.path.exists(_DUCKDB_PATH):
+        return None
+    try:
+        return duckdb.connect(_DUCKDB_PATH, read_only=True)
+    except Exception:
+        return None
+
+def _duckdb_table_exists(con: Any, table_name: str) -> bool:
+    try:
+        q = "SELECT 1 FROM information_schema.tables WHERE lower(table_name)=lower(?) LIMIT 1"
+        return con.execute(q, [table_name]).fetchone() is not None
+    except Exception:
+        return False
+
+def _duckdb_num_expr(col: str) -> str:
+    return f"TRY_CAST(REPLACE(REPLACE(TRIM(CAST({col} AS VARCHAR)), '.', ''), ',', '.') AS DOUBLE)"
+
+def _duckdb_date_expr(col: str) -> str:
+    return (
+        f"COALESCE("
+        f"TRY_CAST({col} AS TIMESTAMP), "
+        f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d/%m/%Y %H:%M:%S'), "
+        f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d/%m/%Y %H:%M'), "
+        f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d/%m/%Y')"
+        f")"
+    )
+
+
+
+
+def _duckdb_fetchdf(sql: str, params: Optional[List[Any]] = None) -> pd.DataFrame:
+    con = _duckdb_connect()
+    if con is None:
+        return pd.DataFrame()
+    try:
+        return con.execute(sql, params or []).fetchdf()
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        con.close()
+
 
 def _safe_get(dct: Dict[str, Any], *keys: str, default: Any = None) -> Any:
     cur = dct
@@ -45,32 +100,13 @@ def _extract_sources(raw: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     }
 
 def _find_ons_csv(ons: Dict[str, Any], dataset_prefix: str) -> Optional[str]:
-    """
-    Busca o dataset mais recente baseado no prefixo.
-    Ex: dataset_prefix="EAR_Diario_Subsistema"
-    Vai encontrar EAR_Diario_Subsistema_2026
-    """
+    """Modo DuckDB-only: leitura direta de CSV desabilitada no core_analysis."""
+    return None
 
-    candidates = []
 
-    for ds in ons.get("datasets", []):
-        name = ds.get("dataset", "")
-        file = ds.get("file")
-
-        # Compatibilidade com paths em formato Windows (ex.: data\ons\2026\arquivo.csv)
-        if isinstance(file, str):
-            file = file.replace("\\", os.sep)
-
-        if name.startswith(dataset_prefix) and file and os.path.exists(file):
-            candidates.append((name, file))
-
-    if not candidates:
-        return None
-
-    # Ordena por nome (ano no final)
-    candidates.sort(reverse=True)
-
-    return candidates[0][1]
+def _find_ons_csv_all(ons: Dict[str, Any], dataset_prefix: str) -> List[str]:
+    """Modo DuckDB-only: leitura direta de CSV desabilitada no core_analysis."""
+    return []
 
 
 def _find_ons_csv_all(ons: Dict[str, Any], dataset_prefix: str) -> List[str]:
@@ -127,12 +163,10 @@ def _hydrology_status(ear: Optional[float]) -> Dict[str, Any]:
 
 
 def _compute_hydrology_from_csv(ons: Dict[str, Any]) -> Dict[str, Any]:
+    """Hidrologia em modo DuckDB-only."""
     ear_medio = ena_media = tendencia = None
-
     try:
         ear_by_sub, ena_by_sub = _load_ear_ena_monthly_by_submercado(ons)
-
-        # EAR médio mensal consolidado entre submercados
         if ear_by_sub:
             df_ear = pd.concat(ear_by_sub, axis=1)
             ear_mensal = df_ear.mean(axis=1, skipna=True).dropna().sort_index()
@@ -141,85 +175,11 @@ def _compute_hydrology_from_csv(ons: Dict[str, Any]) -> Dict[str, Any]:
                 recent = float(ear_mensal.tail(3).mean())
                 past = float(ear_mensal.tail(12).mean())
                 tendencia = float(recent - past) if past else None
-
-        # ENA média mensal consolidada entre submercados
         if ena_by_sub:
             df_ena = pd.concat(ena_by_sub, axis=1)
             ena_mensal = df_ena.mean(axis=1, skipna=True).dropna().sort_index()
             if not ena_mensal.empty:
                 ena_media = float(ena_mensal.mean())
-
-        # Fallback para esquema legado caso mapeamento de submercado não esteja disponível.
-        if ear_medio is None or ena_media is None:
-            ear_files = _find_ons_csv_all(ons, "EAR_Diario_Subsistema")
-            ena_files = _find_ons_csv_all(ons, "ENA_Diario_Subsistema")
-
-            if ear_medio is None and ear_files:
-                ear_frames = []
-                for ear_file in ear_files:
-                    try:
-                        df = pd.read_csv(ear_file, sep=None, engine="python")
-                        col = "ear_verif_subsistema_percentual"
-                        col_ts = next((c for c in ["ear_data", "din_instante", "instante"] if c in df.columns), None)
-                        if col not in df.columns:
-                            continue
-                        df[col] = _normalize_br_numeric_series(df[col])
-                        if col_ts:
-                            df[col_ts] = _parse_date_series(df[col_ts])
-                        df = df.dropna(subset=[col])
-                        if not df.empty:
-                            cols = [c for c in [col_ts, col] if c]
-                            ear_frames.append(df[cols])
-                    except Exception:
-                        continue
-
-                if ear_frames:
-                    df_ear = pd.concat(ear_frames, ignore_index=True)
-                    if df_ear.shape[1] >= 2:
-                        ts_col, val_col = df_ear.columns[0], df_ear.columns[1]
-                        if ts_col:
-                            df_ear = df_ear.dropna(subset=[ts_col]).sort_values(ts_col)
-                        df_ear = df_ear.dropna(subset=[val_col])
-                        if not df_ear.empty:
-                            ear_medio = float(df_ear[val_col].mean())
-                            recent = df_ear.tail(7)[val_col].mean()
-                            past = df_ear.tail(30)[val_col].mean()
-                            tendencia = float(recent - past) if past else tendencia
-
-            if ena_media is None and ena_files:
-                ena_frames = []
-                ena_candidates = [
-                    "ena_armazenavel_regiao_mwmed",
-                    "ena_bruta_regiao_mwmed",
-                    "ena_verificada_mwmed",
-                    "val_enaarmazenavel",
-                    "val_enabruta",
-                ]
-                for ena_file in ena_files:
-                    try:
-                        df = pd.read_csv(ena_file, sep=None, engine="python")
-                        col = next((c for c in ena_candidates if c in df.columns), None)
-                        col_ts = next((c for c in ["ena_data", "din_instante", "instante", "ena_datainicio"] if c in df.columns), None)
-                        if not col:
-                            continue
-                        df[col] = _normalize_br_numeric_series(df[col])
-                        if col_ts:
-                            df[col_ts] = _parse_date_series(df[col_ts])
-                        df = df.dropna(subset=[col])
-                        if not df.empty:
-                            cols = [c for c in [col_ts, col] if c]
-                            ena_frames.append(df[cols])
-                    except Exception:
-                        continue
-
-                if ena_frames:
-                    df_ena = pd.concat(ena_frames, ignore_index=True)
-                    val_col = next((c for c in ena_candidates if c in df_ena.columns), None)
-                    if val_col:
-                        df_ena = df_ena.dropna(subset=[val_col])
-                        if not df_ena.empty:
-                            ena_media = float(df_ena[val_col].mean())
-
     except Exception:
         pass
 
@@ -236,36 +196,32 @@ def _compute_hydrology_from_csv(ons: Dict[str, Any]) -> Dict[str, Any]:
 # =====================================================================
 
 def _extract_energia_agora(ons: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Processa geração e carga horária (Energia Agora).
-    Retorna métricas + séries preservadas.
-    """
-    geracao = {}
-    carga = {}
+    """Processa geração e carga horária direto do DuckDB (sem leitura CSV em memória)."""
+    geracao: Dict[str, Any] = {}
+    carga: Dict[str, Any] = {}
 
-    for ds in ons.get("datasets", []):
-        if ds.get("origin") != "energia_agora":
-            continue
+    con = _duckdb_connect()
+    if con is None:
+        return {"generation": geracao, "load": carga, "status": "indisponível"}
 
-        name = ds.get("dataset", "").lower()
-        file = ds.get("file")
+    try:
+        tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
 
-        if not file or not os.path.exists(file):
-            continue
+        for t in tables:
+            tl = str(t).lower()
+            info = con.execute(f"PRAGMA table_info('{t}')").fetchall()
+            cols = {c[1].lower(): c[1] for c in info}
 
-        try:
-            df = pd.read_csv(file)
-            if "instante" not in df.columns:
-                continue
-
-            df["instante"] = pd.to_datetime(df["instante"])
-            df = df.sort_values("instante")
-
-            # ---------------- GERAÇÃO ----------------
-            if name.startswith("geracao_") and "geracao" in df.columns:
-                fonte = name.replace("geracao_", "")
+            if tl.startswith("geracao_") and "instante" in cols and "geracao" in cols:
+                df = con.execute(
+                    f"SELECT TRY_CAST({cols['instante']} AS TIMESTAMP) AS instante, "
+                    f"TRY_CAST({cols['geracao']} AS DOUBLE) AS geracao FROM {t}"
+                ).fetchdf()
+                df = df.dropna(subset=["instante", "geracao"]).sort_values("instante")
+                if df.empty:
+                    continue
+                fonte = tl.replace("geracao_", "")
                 v = df["geracao"]
-
                 geracao[fonte] = {
                     "media": float(v.mean()),
                     "max": float(v.max()),
@@ -274,11 +230,16 @@ def _extract_energia_agora(ons: Dict[str, Any]) -> Dict[str, Any]:
                     "serie": df[["instante", "geracao"]].to_dict("records"),
                 }
 
-            # ---------------- CARGA ----------------
-            if name.startswith("carga_") and "carga" in df.columns:
-                area = name.replace("carga_", "")
+            if tl.startswith("carga_") and "instante" in cols and "carga" in cols:
+                df = con.execute(
+                    f"SELECT TRY_CAST({cols['instante']} AS TIMESTAMP) AS instante, "
+                    f"TRY_CAST({cols['carga']} AS DOUBLE) AS carga FROM {t}"
+                ).fetchdf()
+                df = df.dropna(subset=["instante", "carga"]).sort_values("instante")
+                if df.empty:
+                    continue
+                area = tl.replace("carga_", "")
                 v = df["carga"]
-
                 carga[area] = {
                     "media": float(v.mean()),
                     "max": float(v.max()),
@@ -286,20 +247,117 @@ def _extract_energia_agora(ons: Dict[str, Any]) -> Dict[str, Any]:
                     "rampa_max": float(v.diff().abs().max()),
                     "serie": df[["instante", "carga"]].to_dict("records"),
                 }
+    except Exception:
+        pass
+    finally:
+        con.close()
 
-        except Exception:
-            continue
+    status = "disponível" if geracao or carga else "indisponível"
+    return {"generation": geracao, "load": carga, "status": status}
 
-    status = "disponível" if (
-        any(v.get("media", 0) > 0 for v in geracao.values()) or
-        any(v.get("media", 0) > 0 for v in carga.values())
-    ) else "indisponível"
 
-    return {
-        "generation": geracao,
-        "load": carga,
-        "status": status,
-    }
+def _normalize_power_to_mw(series: pd.Series) -> pd.Series:
+    """
+    Normaliza potência para MW quando os dados parecem estar em Watts.
+    Heurística: medianas muito altas (>1e6) são tratadas como W.
+    """
+    if series.empty:
+        return series
+
+    med = series.dropna().abs().median() if not series.dropna().empty else 0
+    if med > 1_000_000:
+        return series / 1_000_000.0
+    return series
+
+
+def _extract_open_data_historical_operation(ons: Dict[str, Any]) -> Dict[str, Any]:
+    """Consolida operação histórica via DuckDB (geracao_usina_horaria + curva_carga)."""
+    generation: Dict[str, Dict[str, Any]] = {}
+    load: Dict[str, Dict[str, Any]] = {}
+
+    con = _duckdb_connect()
+    if con is None:
+        return {"generation": generation, "load": load, "status": "indisponível"}
+
+    try:
+        if _duckdb_table_exists(con, "geracao_usina_horaria"):
+            q = f"""
+                SELECT
+                    {_duckdb_date_expr('din_instante')} AS din_instante,
+                    UPPER(TRIM(CAST(nom_tipousina AS VARCHAR))) AS fonte,
+                    {_duckdb_num_expr('val_geracao')} AS val_geracao
+                FROM geracao_usina_horaria
+                WHERE din_instante IS NOT NULL
+            """
+            g = con.execute(q).fetchdf()
+            if not g.empty:
+                g = g.dropna(subset=["din_instante", "fonte", "val_geracao"])
+                g["val_geracao"] = _normalize_power_to_mw(pd.to_numeric(g["val_geracao"], errors="coerce"))
+                g = g.dropna(subset=["val_geracao"])
+                for fonte, grp in g.groupby("fonte"):
+                    s = grp.groupby("din_instante")["val_geracao"].sum().sort_index()
+                    generation[fonte.lower()] = {
+                        "media": float(s.mean()),
+                        "max": float(s.max()),
+                        "min": float(s.min()),
+                        "rampa_max": float(s.diff().abs().max()) if len(s) > 1 else 0.0,
+                        "serie": [{"instante": i.strftime('%Y-%m-%d %H:%M:%S'), "geracao": float(v)} for i, v in s.items()],
+                    }
+
+        if _duckdb_table_exists(con, "curva_carga"):
+            q = f"""
+                SELECT
+                    {_duckdb_date_expr('din_instante')} AS din_instante,
+                    TRIM(CAST(id_subsistema AS VARCHAR)) AS id_subsistema,
+                    {_duckdb_num_expr('val_cargaenergiahomwmed')} AS carga
+                FROM curva_carga
+                WHERE din_instante IS NOT NULL
+            """
+            c = con.execute(q).fetchdf()
+            if not c.empty:
+                c = c.dropna(subset=["din_instante", "id_subsistema", "carga"])
+                c["submercado"] = c["id_subsistema"].map(_normalize_submercado_name)
+                c = c.dropna(subset=["submercado"])
+                for sm, grp in c.groupby("submercado"):
+                    s = grp.groupby("din_instante")["carga"].sum().sort_index()
+                    load[sm.lower()] = {
+                        "media": float(s.mean()),
+                        "max": float(s.max()),
+                        "min": float(s.min()),
+                        "rampa_max": float(s.diff().abs().max()) if len(s) > 1 else 0.0,
+                        "serie": [{"instante": i.strftime('%Y-%m-%d %H:%M:%S'), "carga": float(v)} for i, v in s.items()],
+                    }
+                s_sin = c.groupby("din_instante")["carga"].sum().sort_index()
+                load["sin"] = {
+                    "media": float(s_sin.mean()),
+                    "max": float(s_sin.max()),
+                    "min": float(s_sin.min()),
+                    "rampa_max": float(s_sin.diff().abs().max()) if len(s_sin) > 1 else 0.0,
+                    "serie": [{"instante": i.strftime('%Y-%m-%d %H:%M:%S'), "carga": float(v)} for i, v in s_sin.items()],
+                }
+    except Exception:
+        pass
+    finally:
+        con.close()
+
+    return {"generation": generation, "load": load, "status": "disponível" if (generation or load) else "indisponível"}
+
+
+def _merge_operation_data(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
+    """Mescla dados de operação, priorizando séries mais longas do secondary."""
+    merged_gen = dict(primary.get("generation", {}))
+    merged_load = dict(primary.get("load", {}))
+
+    for k, v in secondary.get("generation", {}).items():
+        if k not in merged_gen or len(v.get("serie", [])) > len(merged_gen[k].get("serie", [])):
+            merged_gen[k] = v
+
+    for k, v in secondary.get("load", {}).items():
+        if k not in merged_load or len(v.get("serie", [])) > len(merged_load[k].get("serie", [])):
+            merged_load[k] = v
+
+    status = "disponível" if merged_gen or merged_load else "indisponível"
+    return {"generation": merged_gen, "load": merged_load, "status": status}
 
 
 def _normalize_power_to_mw(series: pd.Series) -> pd.Series:
@@ -453,15 +511,58 @@ def _compute_curtailment_from_csv(
     col_verificada: str,
     col_flag_invalido: Optional[str] = None,
 ) -> Dict[str, Any]:
+    table_name = re.sub(r"[^a-z0-9_]", "", dataset_name.lower())
 
+    # Prioridade: DuckDB
+    con = _duckdb_connect()
+    if con is not None and _duckdb_table_exists(con, table_name):
+        try:
+            flag_filter = ""
+            if col_flag_invalido:
+                flag_filter = f" AND COALESCE(TRY_CAST({col_flag_invalido} AS BOOLEAN), FALSE) = FALSE"
+
+            q = f"""
+                SELECT
+                    {_duckdb_date_expr('din_instante')} AS din_instante,
+                    {_duckdb_num_expr(col_estimada)} AS estimada,
+                    {_duckdb_num_expr(col_verificada)} AS verificada
+                FROM {table_name}
+                WHERE {_duckdb_date_expr('din_instante')} IS NOT NULL
+                {flag_filter}
+            """
+            df = con.execute(q).fetchdf()
+            if df.empty:
+                return {"status": "indisponível"}
+
+            df = df.dropna(subset=["din_instante", "estimada", "verificada"])
+            df = df[(df["estimada"] > 0)]
+            if df.empty:
+                return {"status": "indisponível"}
+
+            df["curtailment_abs"] = (df["estimada"] - df["verificada"]).clip(lower=0)
+            serie = df.groupby("din_instante")["curtailment_abs"].sum().sort_index()
+            return {
+                "status": "disponível",
+                "curtailment_total_mwh": float(df["curtailment_abs"].sum()),
+                "geracao_disponivel_total_mwh": float(df["estimada"].sum()),
+                "geracao_realizada_total_mwh": float(df["verificada"].sum()),
+                "curtailment_pct_total": float(df["curtailment_abs"].sum() / df["estimada"].sum()) if float(df["estimada"].sum()) > 0 else None,
+                "curtailment_medio_hora": float(serie.mean()) if not serie.empty else 0,
+                "curtailment_max_hora": float(serie.max()) if not serie.empty else 0,
+                "serie": serie.reset_index().rename(columns={"din_instante": "instante", "curtailment_abs": "valor"}).to_dict("records"),
+            }
+        except Exception:
+            pass
+        finally:
+            con.close()
+
+    # Fallback CSV apenas se necessário
     file = _find_ons_csv(ons, dataset_name)
-
     if not file or not os.path.exists(file):
         return {"status": "indisponível"}
 
     try:
         df = pd.read_csv(file, sep=None, engine="python")
-
         if "din_instante" not in df.columns:
             return {"status": "indisponível"}
 
@@ -473,28 +574,12 @@ def _compute_curtailment_from_csv(
 
         df[col_estimada] = _normalize_br_numeric_series(df[col_estimada])
         df[col_verificada] = _normalize_br_numeric_series(df[col_verificada])
+        df = df[(df[col_estimada] > 0) & df[col_estimada].notna() & df[col_verificada].notna()]
+        if df.empty:
+            return {"status": "indisponível"}
 
-        df = df[
-            (df[col_estimada] > 0) &
-            df[col_estimada].notna() &
-            df[col_verificada].notna()
-        ]
-
-        df["curtailment_abs"] = (
-            df[col_estimada] - df[col_verificada]
-        ).clip(lower=0)
-
-        df["curtailment_pct"] = np.where(
-            df[col_estimada] > 0,
-            df["curtailment_abs"] / df[col_estimada],
-            0
-        )
-
-        serie = (
-            df.groupby("din_instante")["curtailment_abs"]
-            .sum()
-            .sort_index()
-        )
+        df["curtailment_abs"] = (df[col_estimada] - df[col_verificada]).clip(lower=0)
+        serie = df.groupby("din_instante")["curtailment_abs"].sum().sort_index()
 
         return {
             "status": "disponível",
@@ -504,11 +589,8 @@ def _compute_curtailment_from_csv(
             "curtailment_pct_total": float(df["curtailment_abs"].sum() / df[col_estimada].sum()) if float(df[col_estimada].sum()) > 0 else None,
             "curtailment_medio_hora": float(serie.mean()) if not serie.empty else 0,
             "curtailment_max_hora": float(serie.max()) if not serie.empty else 0,
-            "serie": serie.reset_index().rename(
-                columns={"din_instante": "instante", "curtailment_abs": "valor"}
-            ).to_dict("records"),
+            "serie": serie.reset_index().rename(columns={"din_instante": "instante", "curtailment_abs": "valor"}).to_dict("records"),
         }
-
     except Exception:
         return {"status": "erro"}
 
@@ -726,173 +808,146 @@ def _normalize_submercado_name(value: Any) -> Optional[str]:
 
 
 def _load_gfom_hourly(ons: Dict[str, Any]) -> pd.DataFrame:
-    frames = []
-    for ds in ons.get("datasets", []):
-        name = ds.get("dataset", "")
-        if not name.startswith("Despacho_GFOM_"):
-            continue
-        file = _dataset_file(ds)
-        if not file or not os.path.exists(file):
-            continue
-        try:
-            df = pd.read_csv(file, sep=None, engine="python")
-            if "din_instante" not in df.columns:
-                continue
-            col_ger = "val_verifgeracao" if "val_verifgeracao" in df.columns else None
-            col_gfom = "val_verifgfom" if "val_verifgfom" in df.columns else None
-            if not col_ger or not col_gfom:
-                continue
-            df["din_instante"] = _parse_date_series(df["din_instante"])
-            df[col_ger] = _normalize_br_numeric_series(df[col_ger])
-            df[col_gfom] = _normalize_br_numeric_series(df[col_gfom])
-            df = df.dropna(subset=["din_instante", col_ger, col_gfom])
-            if df.empty:
-                continue
-            frames.append(df[["din_instante", col_ger, col_gfom]].rename(columns={col_ger: "ger", col_gfom: "gfom"}))
-        except Exception:
-            continue
-
-    if not frames:
+    if duckdb is None:
         return pd.DataFrame(columns=["ger", "gfom"])
-
-    all_df = pd.concat(frames, ignore_index=True)
-    return all_df.groupby("din_instante")[["ger", "gfom"]].sum().sort_index()
+    con = _duckdb_connect()
+    if con is None or not _duckdb_table_exists(con, "despacho_gfom"):
+        if con is not None:
+            con.close()
+        return pd.DataFrame(columns=["ger", "gfom"])
+    try:
+        q = f"""
+            SELECT
+                {_duckdb_date_expr('din_instante')} AS din_instante,
+                SUM({_duckdb_num_expr('val_verifgeracao')}) AS ger,
+                SUM({_duckdb_num_expr('val_verifgfom')}) AS gfom
+            FROM despacho_gfom
+            GROUP BY 1
+            HAVING din_instante IS NOT NULL
+            ORDER BY 1
+        """
+        df = con.execute(q).fetchdf()
+        if df.empty:
+            return pd.DataFrame(columns=["ger", "gfom"])
+        return df.set_index("din_instante")[["ger", "gfom"]]
+    except Exception:
+        return pd.DataFrame(columns=["ger", "gfom"])
+    finally:
+        con.close()
 
 
 def _load_gfom_hourly_by_submarket(ons: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
-    frames: List[pd.DataFrame] = []
-    for ds in ons.get("datasets", []):
-        name = ds.get("dataset", "")
-        if not name.startswith("Despacho_GFOM_"):
-            continue
-        file = _dataset_file(ds)
-        if not file or not os.path.exists(file):
-            continue
-        try:
-            df = pd.read_csv(file, sep=None, engine="python")
-            if "din_instante" not in df.columns:
-                continue
-            col_sub = "id_subsistema" if "id_subsistema" in df.columns else ("submercado" if "submercado" in df.columns else None)
-            col_ger = "val_verifgeracao" if "val_verifgeracao" in df.columns else None
-            col_gfom = "val_verifgfom" if "val_verifgfom" in df.columns else None
-            if not col_sub or not col_ger or not col_gfom:
-                continue
-
-            df["din_instante"] = _parse_date_series(df["din_instante"])
-            df[col_ger] = _normalize_br_numeric_series(df[col_ger])
-            df[col_gfom] = _normalize_br_numeric_series(df[col_gfom])
-            df["submercado"] = df[col_sub].map(_normalize_submercado_name)
-            df = df.dropna(subset=["din_instante", "submercado", col_ger, col_gfom])
-            if df.empty:
-                continue
-            frames.append(df[["din_instante", "submercado", col_ger, col_gfom]].rename(columns={col_ger: "ger", col_gfom: "gfom"}))
-        except Exception:
-            continue
-
-    if not frames:
+    if duckdb is None:
         return {}
-
-    all_df = pd.concat(frames, ignore_index=True)
-    result: Dict[str, pd.DataFrame] = {}
-    for sm, grp in all_df.groupby("submercado"):
-        g = grp.groupby("din_instante")[["ger", "gfom"]].sum().sort_index()
-        result[str(sm)] = g
-    return result
+    con = _duckdb_connect()
+    if con is None or not _duckdb_table_exists(con, "despacho_gfom"):
+        if con is not None:
+            con.close()
+        return {}
+    try:
+        q = f"""
+            SELECT
+                {_duckdb_date_expr('din_instante')} AS din_instante,
+                UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS submercado_raw,
+                SUM({_duckdb_num_expr('val_verifgeracao')}) AS ger,
+                SUM({_duckdb_num_expr('val_verifgfom')}) AS gfom
+            FROM despacho_gfom
+            GROUP BY 1,2
+            HAVING din_instante IS NOT NULL
+        """
+        df = con.execute(q).fetchdf()
+        if df.empty:
+            return {}
+        df["submercado"] = df["submercado_raw"].map(_normalize_submercado_name)
+        df = df.dropna(subset=["submercado"])
+        out: Dict[str, pd.DataFrame] = {}
+        for sm, grp in df.groupby("submercado"):
+            out[str(sm)] = grp.groupby("din_instante")[["ger", "gfom"]].sum().sort_index()
+        return out
+    except Exception:
+        return {}
+    finally:
+        con.close()
 
 
 def _load_disponibilidade_horaria(ons: Dict[str, Any]) -> pd.Series:
-    frames = []
-    for ds in ons.get("datasets", []):
-        name = ds.get("dataset", "")
-        if not name.startswith("Disponibilidade_Usina_"):
-            continue
-        file = _dataset_file(ds)
-        if not file or not os.path.exists(file):
-            continue
-        try:
-            df = pd.read_csv(file, sep=None, engine="python")
-            if "din_instante" not in df.columns:
-                continue
-            col_val = next((c for c in ["val_dispoperacional", "val_dispsincronizada", "val_potenciainstalada"] if c in df.columns), None)
-            if not col_val:
-                continue
-            df["din_instante"] = _parse_date_series(df["din_instante"])
-            df[col_val] = _normalize_power_to_mw(_normalize_br_numeric_series(df[col_val]))
-            df = df.dropna(subset=["din_instante", col_val])
-            if df.empty:
-                continue
-            frames.append(df[["din_instante", col_val]].rename(columns={col_val: "disp"}))
-        except Exception:
-            continue
-
-    if not frames:
+    if duckdb is None:
         return pd.Series(dtype=float)
-    all_df = pd.concat(frames, ignore_index=True)
-    return all_df.groupby("din_instante")["disp"].sum().sort_index()
+    con = _duckdb_connect()
+    if con is None or not _duckdb_table_exists(con, "disponibilidade_usina"):
+        if con is not None:
+            con.close()
+        return pd.Series(dtype=float)
+    try:
+        q = f"""
+            SELECT
+                {_duckdb_date_expr('din_instante')} AS din_instante,
+                SUM(COALESCE({_duckdb_num_expr('val_dispoperacional')}, {_duckdb_num_expr('val_dispsincronizada')}, {_duckdb_num_expr('val_potenciainstalada')})) AS disp
+            FROM disponibilidade_usina
+            GROUP BY 1
+            HAVING din_instante IS NOT NULL
+            ORDER BY 1
+        """
+        df = con.execute(q).fetchdf()
+        if df.empty:
+            return pd.Series(dtype=float)
+        s = pd.Series(df['disp'].values, index=pd.to_datetime(df['din_instante']))
+        return _normalize_power_to_mw(s).sort_index()
+    except Exception:
+        return pd.Series(dtype=float)
+    finally:
+        con.close()
 
 
 def _load_ear_ena_monthly_by_submercado(ons: Dict[str, Any]) -> Tuple[Dict[str, pd.Series], Dict[str, pd.Series]]:
-    """Consolida EAR e ENA mensais por submercado a partir de múltiplos arquivos anuais ONS."""
+    """Consolida EAR e ENA mensais por submercado apenas via DuckDB."""
     ear_by_sub: Dict[str, pd.Series] = {}
     ena_by_sub: Dict[str, pd.Series] = {}
 
-    ear_frames: List[pd.DataFrame] = []
-    for ear_file in _find_ons_csv_all(ons, "EAR_Diario_Subsistema"):
-        try:
-            df = pd.read_csv(ear_file, sep=None, engine="python")
-            col_ts = next((c for c in ["ear_data", "din_instante", "instante"] if c in df.columns), None)
-            col_sub = next((c for c in ["id_subsistema", "nom_subsistema", "submercado"] if c in df.columns), None)
-            col_ear = "ear_verif_subsistema_percentual" if "ear_verif_subsistema_percentual" in df.columns else None
-            if not col_ts or not col_sub or not col_ear:
-                continue
-            df[col_ts] = _parse_date_series(df[col_ts])
-            df[col_ear] = _normalize_br_numeric_series(df[col_ear])
-            df["submercado"] = df[col_sub].map(_normalize_submercado_name)
-            df = df.dropna(subset=[col_ts, col_ear, "submercado"])
-            if df.empty:
-                continue
-            ear_frames.append(df[[col_ts, "submercado", col_ear]].rename(columns={col_ts: "ts", col_ear: "valor"}))
-        except Exception:
-            continue
+    con = _duckdb_connect()
+    if con is None:
+        return ear_by_sub, ena_by_sub
 
-    if ear_frames:
-        ear_df = pd.concat(ear_frames, ignore_index=True)
-        for sm, grp in ear_df.groupby("submercado"):
-            s = grp.set_index("ts")["valor"]
-            ear_by_sub[str(sm)] = _ensure_tz_naive_index(s).resample("ME").mean().dropna()
+    try:
+        if _duckdb_table_exists(con, "ear_diario_subsistema"):
+            q_ear = f"""
+                SELECT
+                    DATE_TRUNC('month', {_duckdb_date_expr('ear_data')}) AS mes,
+                    UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS submercado_raw,
+                    AVG({_duckdb_num_expr('ear_verif_subsistema_percentual')}) AS valor
+                FROM ear_diario_subsistema
+                GROUP BY 1,2
+                HAVING mes IS NOT NULL AND valor IS NOT NULL
+            """
+            dfe = con.execute(q_ear).fetchdf()
+            if not dfe.empty:
+                dfe['submercado'] = dfe['submercado_raw'].map(_normalize_submercado_name)
+                dfe = dfe.dropna(subset=['submercado'])
+                for sm, grp in dfe.groupby('submercado'):
+                    idx = pd.to_datetime(grp['mes']) + pd.offsets.MonthEnd(0)
+                    ear_by_sub[str(sm)] = pd.Series(grp['valor'].values, index=idx).sort_index()
 
-    ena_frames: List[pd.DataFrame] = []
-    for ena_file in _find_ons_csv_all(ons, "ENA_Diario_Subsistema"):
-        try:
-            df = pd.read_csv(ena_file, sep=None, engine="python")
-            col_ts = next((c for c in ["ena_data", "din_instante", "instante", "ena_datainicio"] if c in df.columns), None)
-            col_sub = next((c for c in ["id_subsistema", "nom_subsistema", "submercado"] if c in df.columns), None)
-            col_ena = next(
-                (c for c in [
-                    "ena_armazenavel_regiao_mwmed",
-                    "ena_bruta_regiao_mwmed",
-                    "val_enaarmazenavel",
-                    "val_enabruta",
-                ] if c in df.columns),
-                None,
-            )
-            if not col_ts or not col_sub or not col_ena:
-                continue
-            df[col_ts] = _parse_date_series(df[col_ts])
-            df[col_ena] = _normalize_br_numeric_series(df[col_ena])
-            df["submercado"] = df[col_sub].map(_normalize_submercado_name)
-            df = df.dropna(subset=[col_ts, col_ena, "submercado"])
-            if df.empty:
-                continue
-            ena_frames.append(df[[col_ts, "submercado", col_ena]].rename(columns={col_ts: "ts", col_ena: "valor"}))
-        except Exception:
-            continue
-
-    if ena_frames:
-        ena_df = pd.concat(ena_frames, ignore_index=True)
-        for sm, grp in ena_df.groupby("submercado"):
-            s = grp.set_index("ts")["valor"]
-            ena_by_sub[str(sm)] = _ensure_tz_naive_index(s).resample("ME").mean().dropna()
+        if _duckdb_table_exists(con, "ena_diario_subsistema"):
+            q_ena = f"""
+                SELECT
+                    DATE_TRUNC('month', {_duckdb_date_expr('ena_data')}) AS mes,
+                    UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS submercado_raw,
+                    AVG(COALESCE({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}, {_duckdb_num_expr('ena_bruta_regiao_mwmed')})) AS valor
+                FROM ena_diario_subsistema
+                GROUP BY 1,2
+                HAVING mes IS NOT NULL AND valor IS NOT NULL
+            """
+            dfn = con.execute(q_ena).fetchdf()
+            if not dfn.empty:
+                dfn['submercado'] = dfn['submercado_raw'].map(_normalize_submercado_name)
+                dfn = dfn.dropna(subset=['submercado'])
+                for sm, grp in dfn.groupby('submercado'):
+                    idx = pd.to_datetime(grp['mes']) + pd.offsets.MonthEnd(0)
+                    ena_by_sub[str(sm)] = pd.Series(grp['valor'].values, index=idx).sort_index()
+    except Exception:
+        pass
+    finally:
+        con.close()
 
     return ear_by_sub, ena_by_sub
 
@@ -904,75 +959,32 @@ def _compute_effective_availability_margin(
     if carga_sin_series.empty or carga_sin_series.mean() <= 0:
         return {"status": "indisponível"}
 
-    file = _find_ons_csv(ons, "Disponibilidade_Usina")
-    if not file or not os.path.exists(file):
+    disponibilidade_h = _load_disponibilidade_horaria(ons)
+    if disponibilidade_h.empty:
         return {"status": "indisponível"}
 
-    try:
-        df = pd.read_csv(file, sep=None, engine="python")
+    cap_disp_media = float(disponibilidade_h.mean()) if not disponibilidade_h.empty else None
+    carga_media = float(carga_sin_series.mean())
+    if cap_disp_media is None or carga_media <= 0:
+        return {"status": "indisponível"}
 
-        col_ts = "din_instante" if "din_instante" in df.columns else None
-        if col_ts is None:
-            return {"status": "indisponível"}
-
-        # Preferência explícita pelas colunas reais do dataset ONS informado.
-        pref_cols = ["val_dispoperacional", "val_dispsincronizada", "val_potenciainstalada"]
-        col_val = next((c for c in pref_cols if c in df.columns), None)
-        if col_val is None:
-            return {"status": "indisponível"}
-
-        df[col_ts] = _parse_date_series(df[col_ts])
-        df[col_val] = _normalize_br_numeric_series(df[col_val])
-        df[col_val] = _normalize_power_to_mw(df[col_val])
-        df = df.dropna(subset=[col_ts, col_val])
-        if df.empty:
-            return {"status": "indisponível"}
-
-        disponibilidade_h = df.groupby(col_ts)[col_val].sum().sort_index()
-        cap_disp_media = float(disponibilidade_h.mean()) if not disponibilidade_h.empty else None
-        carga_media = float(carga_sin_series.mean())
-
-        if cap_disp_media is None or carga_media <= 0:
-            return {"status": "indisponível"}
-
-        margem = (cap_disp_media - carga_media) / carga_media
-
-        return {
-            "status": "disponível",
-            "capacidade_disponivel_efetiva_media": cap_disp_media,
-            "carga_media": carga_media,
-            "margem_estrutural_oferta": float(margem),
-            "coluna_origem": col_val,
-        }
-    except Exception:
-        return {"status": "erro"}
+    margem = (cap_disp_media - carga_media) / carga_media
+    return {
+        "status": "disponível",
+        "capacidade_disponivel_efetiva_media": cap_disp_media,
+        "carga_media": carga_media,
+        "margem_estrutural_oferta": float(margem),
+        "coluna_origem": "duckdb:disponibilidade_usina",
+    }
 
 
 def _compute_termica_share_from_gfom(ons: Dict[str, Any]) -> Optional[float]:
-    """Dependência térmica efetiva (%): Geração térmica / Geração total (GFOM)."""
-    file = _find_ons_csv(ons, "Despacho_GFOM")
-    if not file or not os.path.exists(file):
+    """Dependência térmica efetiva via DuckDB (soma de val_verifgeracao no despacho GFOM)."""
+    gf = _load_gfom_hourly(ons)
+    if gf.empty or "ger" not in gf.columns:
         return None
-
     try:
-        df = pd.read_csv(file, sep=None, engine="python")
-        if "din_instante" not in df.columns:
-            return None
-
-        col_ger = "val_verifgeracao" if "val_verifgeracao" in df.columns else "val_proggeracao" if "val_proggeracao" in df.columns else None
-        if col_ger is None:
-            return None
-
-        df["din_instante"] = _parse_date_series(df["din_instante"])
-        df[col_ger] = _normalize_br_numeric_series(df[col_ger])
-        df = df.dropna(subset=["din_instante", col_ger])
-        if df.empty:
-            return None
-
-        total_termica = float(df[col_ger].sum())
-
-        # Aproximação de geração total no horizonte horário com Energia Agora (quando disponível)
-        return total_termica
+        return float(pd.to_numeric(gf["ger"], errors="coerce").dropna().sum())
     except Exception:
         return None
 
@@ -1107,33 +1119,6 @@ def _compute_advanced_cross_metrics(
     corr_pld_ear_mensal = None
     pld_vs_ear_mensal_por_submercado: Dict[str, Optional[float]] = {}
     pld_vs_ena_mensal_por_submercado: Dict[str, Optional[float]] = {}
-    ear_files = _find_ons_csv_all(ons, "EAR_Diario_Subsistema")
-    if ear_files and not pld_series.empty:
-        try:
-            ear_frames = []
-            for ear_file in ear_files:
-                try:
-                    df_ear = pd.read_csv(ear_file, sep=None, engine="python")
-                    col_ts = "ear_data" if "ear_data" in df_ear.columns else None
-                    col_ear = "ear_verif_subsistema_percentual" if "ear_verif_subsistema_percentual" in df_ear.columns else None
-                    if not col_ts or not col_ear:
-                        continue
-                    df_ear[col_ts] = _parse_date_series(df_ear[col_ts])
-                    df_ear[col_ear] = _normalize_br_numeric_series(df_ear[col_ear])
-                    df_ear = df_ear.dropna(subset=[col_ts, col_ear])
-                    if not df_ear.empty:
-                        ear_frames.append(df_ear[[col_ts, col_ear]])
-                except Exception:
-                    continue
-
-            if ear_frames:
-                df_ear = pd.concat(ear_frames, ignore_index=True).sort_values("ear_data")
-                s_ear = _ensure_tz_naive_index(df_ear.set_index("ear_data")["ear_verif_subsistema_percentual"])
-                ear_m = s_ear.resample("ME").mean()
-                pld_m = _ensure_tz_naive_index(pld_series).resample("ME").mean()
-                corr_pld_ear_mensal = _safe_corr(pld_m, ear_m, min_points=3)
-        except Exception:
-            pass
 
     ear_media_mensal = None
     ena_media_mensal = None
@@ -1161,46 +1146,50 @@ def _compute_advanced_cross_metrics(
                 for i, v in pd.concat(ena_by_sub, axis=1).mean(axis=1, skipna=True).dropna().sort_index().items()
             }
 
-        # Séries diárias (para consulta horária por dia no dashboard)
-        ear_daily_frames = []
-        for ear_file in _find_ons_csv_all(ons, "EAR_Diario_Subsistema"):
-            try:
-                dfe = pd.read_csv(ear_file, sep=None, engine="python")
-                if "ear_data" in dfe.columns and "ear_verif_subsistema_percentual" in dfe.columns:
-                    dfe["ear_data"] = _parse_date_series(dfe["ear_data"])
-                    dfe["ear_verif_subsistema_percentual"] = _normalize_br_numeric_series(dfe["ear_verif_subsistema_percentual"])
-                    dfe = dfe.dropna(subset=["ear_data", "ear_verif_subsistema_percentual"])
-                    if not dfe.empty:
-                        ear_daily_frames.append(dfe[["ear_data", "ear_verif_subsistema_percentual"]])
-            except Exception:
-                continue
-        if ear_daily_frames:
-            dfe = pd.concat(ear_daily_frames, ignore_index=True)
-            ear_media_diaria = {
-                i.strftime("%Y-%m-%d"): float(v)
-                for i, v in dfe.groupby("ear_data")["ear_verif_subsistema_percentual"].mean().sort_index().items()
-            }
+        if ear_media_mensal and not pld_series.empty:
+            pld_m = _ensure_tz_naive_index(pld_series).resample("ME").mean()
+            ear_m = pd.Series({pd.to_datetime(k) + pd.offsets.MonthEnd(0): v for k, v in ear_media_mensal.items()})
+            corr_pld_ear_mensal = _safe_corr(pld_m, ear_m, min_points=3)
 
-        ena_daily_frames = []
-        ena_candidates = ["ena_armazenavel_regiao_mwmed", "ena_bruta_regiao_mwmed", "val_enaarmazenavel", "val_enabruta"]
-        for ena_file in _find_ons_csv_all(ons, "ENA_Diario_Subsistema"):
+        # Séries diárias (prioridade DuckDB; fallback CSV somente se necessário)
+        con = _duckdb_connect()
+        if con is not None:
             try:
-                dfn = pd.read_csv(ena_file, sep=None, engine="python")
-                col_ena = next((c for c in ena_candidates if c in dfn.columns), None)
-                if "ena_data" in dfn.columns and col_ena:
-                    dfn["ena_data"] = _parse_date_series(dfn["ena_data"])
-                    dfn[col_ena] = _normalize_br_numeric_series(dfn[col_ena])
-                    dfn = dfn.dropna(subset=["ena_data", col_ena])
+                if _duckdb_table_exists(con, "ear_diario_subsistema"):
+                    q_ear_d = f"""
+                        SELECT DATE_TRUNC('day', {_duckdb_date_expr('ear_data')}) AS dia,
+                               AVG({_duckdb_num_expr('ear_verif_subsistema_percentual')}) AS ear_val
+                        FROM ear_diario_subsistema
+                        GROUP BY 1
+                        HAVING dia IS NOT NULL AND ear_val IS NOT NULL
+                        ORDER BY 1
+                    """
+                    dfe = con.execute(q_ear_d).fetchdf()
+                    if not dfe.empty:
+                        ear_media_diaria = {
+                            pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                            for i, v in zip(dfe["dia"], dfe["ear_val"])
+                        }
+
+                if _duckdb_table_exists(con, "ena_diario_subsistema"):
+                    q_ena_d = f"""
+                        SELECT DATE_TRUNC('day', {_duckdb_date_expr('ena_data')}) AS dia,
+                               AVG(COALESCE({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}, {_duckdb_num_expr('ena_bruta_regiao_mwmed')})) AS ena_val
+                        FROM ena_diario_subsistema
+                        GROUP BY 1
+                        HAVING dia IS NOT NULL AND ena_val IS NOT NULL
+                        ORDER BY 1
+                    """
+                    dfn = con.execute(q_ena_d).fetchdf()
                     if not dfn.empty:
-                        ena_daily_frames.append(dfn[["ena_data", col_ena]].rename(columns={col_ena: "ena_val"}))
+                        ena_media_diaria = {
+                            pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                            for i, v in zip(dfn["dia"], dfn["ena_val"])
+                        }
             except Exception:
-                continue
-        if ena_daily_frames:
-            dfn = pd.concat(ena_daily_frames, ignore_index=True)
-            ena_media_diaria = {
-                i.strftime("%Y-%m-%d"): float(v)
-                for i, v in dfn.groupby("ena_data")["ena_val"].mean().sort_index().items()
-            }
+                pass
+            finally:
+                con.close()
 
         pld_m_global = _ensure_tz_naive_index(pld_series).resample("ME").mean()
         carga_liquida_m = _ensure_tz_naive_index(carga_liquida).resample("ME").mean() if not carga_liquida.empty else pd.Series(dtype=float)
@@ -1296,22 +1285,35 @@ def _compute_advanced_cross_metrics(
     try:
         intercambio_series = pd.Series(dtype=float)
         limite_series = pd.Series(dtype=float)
-        for ds in ons.get("datasets", []):
-            name = ds.get("dataset", "").lower()
-            file = ds.get("file")
-            if "intercambio" not in name or not file or not os.path.exists(file):
-                continue
-            df_i = pd.read_csv(file)
-            if "instante" in df_i.columns and "intercambio" in df_i.columns:
-                df_i["instante"] = _parse_date_series(df_i["instante"])
-                df_i["intercambio"] = _normalize_br_numeric_series(df_i["intercambio"])
-                s_i = df_i.dropna(subset=["instante", "intercambio"]).set_index("instante")["intercambio"]
-                intercambio_series = s_i if intercambio_series.empty else intercambio_series.add(s_i, fill_value=0)
-            if "instante" in df_i.columns and "limite" in df_i.columns:
-                df_i["instante"] = _parse_date_series(df_i["instante"])
-                df_i["limite"] = _normalize_br_numeric_series(df_i["limite"])
-                s_l = df_i.dropna(subset=["instante", "limite"]).set_index("instante")["limite"]
-                limite_series = s_l if limite_series.empty else limite_series.add(s_l, fill_value=0)
+
+        con = _duckdb_connect()
+        if con is not None:
+            try:
+                tables = [r[0] for r in con.execute("SHOW TABLES").fetchall() if "intercambio" in str(r[0]).lower()]
+                for t in tables:
+                    info = con.execute(f"PRAGMA table_info('{t}')").fetchall()
+                    cols = {c[1].lower(): c[1] for c in info}
+                    ts_col = cols.get("instante") or cols.get("din_instante")
+                    interc_col = cols.get("intercambio")
+                    lim_col = cols.get("limite")
+                    if not ts_col or (not interc_col and not lim_col):
+                        continue
+                    if interc_col:
+                        qi = f"SELECT {_duckdb_date_expr(ts_col)} AS ts, {_duckdb_num_expr(interc_col)} AS v FROM {t}"
+                        dfi = con.execute(qi).fetchdf().dropna(subset=["ts", "v"])
+                        if not dfi.empty:
+                            s_i = dfi.groupby("ts")["v"].sum().sort_index()
+                            intercambio_series = s_i if intercambio_series.empty else intercambio_series.add(s_i, fill_value=0)
+                    if lim_col:
+                        ql = f"SELECT {_duckdb_date_expr(ts_col)} AS ts, {_duckdb_num_expr(lim_col)} AS v FROM {t}"
+                        dfl = con.execute(ql).fetchdf().dropna(subset=["ts", "v"])
+                        if not dfl.empty:
+                            s_l = dfl.groupby("ts")["v"].sum().sort_index()
+                            limite_series = s_l if limite_series.empty else limite_series.add(s_l, fill_value=0)
+            except Exception:
+                pass
+            finally:
+                con.close()
 
         if not intercambio_series.empty and not limite_series.empty and curtailment.get("total_mwh", 0) > 0:
             df_x = pd.DataFrame({"interc": intercambio_series.abs(), "lim": limite_series.abs()}).dropna()
@@ -2046,6 +2048,28 @@ def calcular_indicadores_termicos_revisados(
 
 def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
     """Retorna série semanal média de CVU por dat_fimsemana (consolidando múltiplos arquivos)."""
+    con = _duckdb_connect()
+    if con is not None:
+        try:
+            if _duckdb_table_exists(con, "cvu_usina_termica"):
+                q = f"""
+                    SELECT
+                        {_duckdb_date_expr('dat_fimsemana')} AS dat_fimsemana,
+                        AVG({_duckdb_num_expr('val_cvu')}) AS val_cvu
+                    FROM cvu_usina_termica
+                    GROUP BY 1
+                    HAVING dat_fimsemana IS NOT NULL AND val_cvu > 0
+                    ORDER BY 1
+                """
+                df = con.execute(q).fetchdf()
+                if not df.empty:
+                    s = pd.Series(df['val_cvu'].values, index=pd.to_datetime(df['dat_fimsemana']))
+                    return s.sort_index().astype(float)
+        except Exception:
+            pass
+        finally:
+            con.close()
+
     files = _find_ons_csv_all(ons, "CVU_Usina_Termica")
     if not files:
         return pd.Series(dtype=float)
@@ -2084,6 +2108,36 @@ def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
 
 def _expand_cvu_weekly_to_daily(ons: Dict[str, Any]) -> pd.Series:
     """Expande CVU semanal para valor diário no intervalo dat_iniciosemana..dat_fimsemana."""
+    con = _duckdb_connect()
+    if con is not None:
+        try:
+            if _duckdb_table_exists(con, "cvu_usina_termica"):
+                q = f"""
+                    SELECT
+                        {_duckdb_date_expr('dat_iniciosemana')} AS dat_iniciosemana,
+                        {_duckdb_date_expr('dat_fimsemana')} AS dat_fimsemana,
+                        AVG({_duckdb_num_expr('val_cvu')}) AS val_cvu
+                    FROM cvu_usina_termica
+                    GROUP BY 1,2
+                    HAVING dat_iniciosemana IS NOT NULL AND dat_fimsemana IS NOT NULL AND val_cvu > 0
+                """
+                wk = con.execute(q).fetchdf()
+                if not wk.empty:
+                    daily_vals: Dict[pd.Timestamp, float] = {}
+                    for _, r in wk.iterrows():
+                        start = pd.Timestamp(r["dat_iniciosemana"]).floor("D")
+                        end = pd.Timestamp(r["dat_fimsemana"]).floor("D")
+                        if end < start:
+                            start, end = end, start
+                        for d in pd.date_range(start, end, freq="D"):
+                            daily_vals[d] = float(r["val_cvu"])
+                    if daily_vals:
+                        return pd.Series(daily_vals).sort_index()
+        except Exception:
+            pass
+        finally:
+            con.close()
+
     files = _find_ons_csv_all(ons, "CVU_Usina_Termica")
     if not files:
         return pd.Series(dtype=float)
@@ -2303,6 +2357,9 @@ def _core_log(stage: str, message: str, **context: Any) -> None:
 
 def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> Dict[str, Any]:
     _core_log("START", "Entrou no build_core_analysis", output_dir=output_dir)
+    if duckdb is None or not os.path.exists(_DUCKDB_PATH):
+        raise RuntimeError("DuckDB obrigatório para build_core_analysis no modo atual.")
+
     sources = _extract_sources(raw_data)
     ons = sources["ons"]
     ccee = sources["ccee"]
@@ -2329,32 +2386,21 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data") -> D
     pld_series_by_submercado: Dict[str, pd.Series] = {}
 
     # --------------------------------------------
-    # 🔎 Consolidar PLD histórico multi-ano (2021–2026)
+    # 🔎 Consolidar PLD histórico via DuckDB
     # --------------------------------------------
-    pld_records = []
-
-    # Caso venha estrutura nova
-    pld_records.extend(ccee.get("data", []))
-
-    # Caso venha estrutura antiga (datasets por ano)
-    pld_hist = ccee.get("pld_historical", {})
-    datasets = pld_hist.get("datasets", [])
-
-    for ds in datasets:
-        records = (
-            ds.get("timeseries")
-            or ds.get("records")
-            or ds.get("data")
-            or []
-        )
-        if isinstance(records, list):
-            pld_records.extend(records)
-
-    # --------------------------------------------
-    # 📊 Processamento consolidado
-    # --------------------------------------------
-    df_pld = pd.DataFrame(pld_records)
-    _core_log("PLD", "Registros PLD consolidados", total_registros=len(pld_records), dataframe_vazio=df_pld.empty)
+    df_pld = _duckdb_fetchdf("""
+        SELECT
+            data AS timestamp,
+            submercado,
+            pld AS pld_hora,
+            ano,
+            mes,
+            hora
+        FROM pld_historical
+        WHERE data IS NOT NULL AND pld IS NOT NULL
+        ORDER BY data
+    """)
+    _core_log("PLD", "Registros PLD consolidados (duckdb)", total_registros=len(df_pld), dataframe_vazio=df_pld.empty)
 
     ccee_structured = {"metadata": {}, "data": []}
 

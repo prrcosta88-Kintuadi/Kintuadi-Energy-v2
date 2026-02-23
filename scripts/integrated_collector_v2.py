@@ -2,8 +2,16 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Dict, Optional, Any
+
+import pandas as pd
+
+try:
+    import duckdb
+except Exception:
+    duckdb = None
 
 logger = logging.getLogger(__name__)
 
@@ -14,12 +22,13 @@ class KintuadiIntegratedCollectorV2:
 
     Responsabilidades:
     - Orquestrar coleta ONS + CCEE
-    - Normalizar estrutura de saída
-    - Persistir dados para consumo do dashboard
+    - Persistir dados em DuckDB para consultas analíticas de baixo uso de memória
+    - Salvar snapshot leve para o dashboard/pipeline
     - NÃO realizar análise de mercado
     """
 
     def __init__(self):
+        self.db_path = "data/kintuadi.duckdb"
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(message)s",
@@ -51,11 +60,132 @@ class KintuadiIntegratedCollectorV2:
             logger.error(f"Erro ao carregar coletores: {e}")
             self.modules_loaded = False
 
-    def _consolidate_ons_audit(self, ons_data: Dict):
-        """
-        Consolida datasets mensais e anuais por ano para auditoria.
-        """
+    def _sanitize_table_name(self, dataset_name: str) -> str:
+        table_name = re.sub(r"_(\d{4})(-\d{2})?$", "", dataset_name)
+        table_name = table_name.lower()
+        table_name = re.sub(r"[^a-z0-9_]", "", table_name)
+        return table_name
 
+    def _extract_year_month(self, dataset_name: str) -> tuple[int, Optional[int]]:
+        year = 0
+        month = None
+        match_month = re.search(r"(\d{4})-(\d{2})$", dataset_name)
+        if match_month:
+            return int(match_month.group(1)), int(match_month.group(2))
+        match_year = re.search(r"(\d{4})$", dataset_name)
+        if match_year:
+            year = int(match_year.group(1))
+        return year, month
+
+    def _persist_ons_dataset(self, dataset_name: str, file_path: str):
+        if duckdb is None:
+            return
+        if not os.path.exists(file_path):
+            return
+
+        con = duckdb.connect(self.db_path)
+        try:
+            year, month = self._extract_year_month(dataset_name)
+            table_name = self._sanitize_table_name(dataset_name)
+            logger.info(f"Persistindo {dataset_name} -> {table_name} (ano={year}, mes={month})")
+
+            con.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {table_name} AS
+                SELECT *
+                FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
+                LIMIT 0
+                """,
+                [file_path],
+            )
+
+            for stmt in [
+                f"ALTER TABLE {table_name} ADD COLUMN ano INTEGER",
+                f"ALTER TABLE {table_name} ADD COLUMN mes INTEGER",
+            ]:
+                try:
+                    con.execute(stmt)
+                except Exception:
+                    pass
+
+            if month is not None:
+                con.execute(f"DELETE FROM {table_name} WHERE ano=? AND mes=?", [year, month])
+            else:
+                con.execute(f"DELETE FROM {table_name} WHERE ano=?", [year])
+
+            cols = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+            col_names = [c[1] for c in cols if c[1] not in ("ano", "mes")]
+            col_list = ", ".join([f'"{c}"' for c in col_names])
+
+            if month is not None:
+                con.execute(
+                    f"""
+                    INSERT INTO {table_name}
+                    ({col_list}, ano, mes)
+                    SELECT {col_list}, ?, ?
+                    FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
+                    """,
+                    [year, month, file_path],
+                )
+            else:
+                con.execute(
+                    f"""
+                    INSERT INTO {table_name}
+                    ({col_list}, ano, mes)
+                    SELECT {col_list}, ?, NULL
+                    FROM read_csv_auto(?, sample_size=-1, ignore_errors=true)
+                    """,
+                    [year, file_path],
+                )
+
+        except Exception as e:
+            logger.error(f"Erro ao persistir {dataset_name} no DuckDB: {e}")
+        finally:
+            con.close()
+
+    def _persist_pld_duckdb(self, df: pd.DataFrame, year: int):
+        if duckdb is None:
+            return
+
+        con = duckdb.connect(self.db_path)
+        try:
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pld_historical (
+                    data TIMESTAMP,
+                    submercado VARCHAR,
+                    pld DOUBLE,
+                    ano INTEGER,
+                    mes INTEGER,
+                    hora INTEGER
+                )
+                """
+            )
+
+            dfx = df.copy()
+            dfx["data"] = pd.to_datetime(dfx["data"], errors="coerce")
+            dfx["ano"] = dfx["data"].dt.year
+            dfx["mes"] = dfx["data"].dt.month
+            dfx["hora"] = dfx["data"].dt.hour
+            dfx = dfx.dropna(subset=["data", "submercado", "pld"])
+            if dfx.empty:
+                return
+
+            con.execute("DELETE FROM pld_historical WHERE ano = ?", [year])
+            con.register("df_temp", dfx)
+            con.execute(
+                """
+                INSERT INTO pld_historical
+                SELECT data, submercado, CAST(pld AS DOUBLE), ano, mes, hora
+                FROM df_temp
+                """
+            )
+        except Exception as e:
+            logger.error(f"Erro ao persistir PLD {year} no DuckDB: {e}")
+        finally:
+            con.close()
+
+    def _consolidate_ons_audit(self, ons_data: Dict):
         base_path = os.path.join("data", "audit")
         os.makedirs(base_path, exist_ok=True)
 
@@ -65,48 +195,30 @@ class KintuadiIntegratedCollectorV2:
         for ds in datasets:
             name = ds.get("dataset", "")
             file = ds.get("file")
-
             if not file or not os.path.exists(file):
                 continue
 
             year = None
-
-            # ==========================
-            # Caso mensal (YYYY-MM)
-            # ==========================
             if "-" in name:
                 try:
                     year = name.split("_")[-1].split("-")[0]
                 except Exception:
                     pass
-
-            # ==========================
-            # Caso anual (YYYY)
-            # ==========================
             if year is None:
                 parts = name.split("_")
                 if parts and parts[-1].isdigit() and len(parts[-1]) == 4:
                     year = parts[-1]
-
             if not year:
                 continue
 
             annual_data.setdefault(year, {})
             annual_data[year][name] = file
 
-        # ==========================
-        # Salva JSON anual
-        # ==========================
         for year, content in annual_data.items():
             path = os.path.join(base_path, f"ons_{year}.json")
-
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(content, f, indent=2, ensure_ascii=False)
 
-
-    # ------------------------------------------------------------------
-    # Core orchestration
-    # ------------------------------------------------------------------
     def collect_all(self) -> Optional[Dict[str, Any]]:
         if not self.modules_loaded:
             logger.error("Coletores não carregados.")
@@ -124,41 +236,51 @@ class KintuadiIntegratedCollectorV2:
                     "collection_start": start_time.isoformat(),
                     "version": "2.0",
                     "project": "Kintuadi Energy Intelligence",
+                    "duckdb_enabled": duckdb is not None,
+                    "duckdb_path": self.db_path,
                 },
                 "sources": {},
             }
 
-            # ---------------- ONS ----------------
             logger.info("[1/2] Coletando dados do ONS...")
             ons_data = self.ons_collector.collect_open_data()
             results["sources"]["ons"] = self._normalize_source(ons_data)
 
-            # ---------------- CCEE ----------------
-            logger.info("[2/2] Coletando dados da CCEE...")
+            if duckdb is not None:
+                for ds in (ons_data or {}).get("datasets", []):
+                    dataset_name = ds.get("dataset")
+                    file_path = ds.get("file")
+                    if dataset_name and file_path and os.path.exists(file_path):
+                        self._persist_ons_dataset(dataset_name, file_path)
 
+            logger.info("[2/2] Coletando dados da CCEE...")
             ccee_data = {}
 
-            # PLD histórico
             pld_hist = self.ccee_collector.collect_pld_historical()
+            if duckdb is not None:
+                for ds in pld_hist.get("datasets", []):
+                    year = ds.get("year")
+                    file_path = ds.get("file")
+                    if not file_path or not os.path.exists(file_path):
+                        continue
+                    try:
+                        df_year = pd.read_csv(file_path)
+                        logger.info(f"Persistindo PLD {year} no DuckDB...")
+                        self._persist_pld_duckdb(df_year, year)
+                    except Exception as e:
+                        logger.warning(f"Falha ao persistir PLD {year}: {e}")
+
             ccee_data["pld_historical"] = self._normalize_source(pld_hist)
 
-            # Open Data
             open_data = self.ccee_collector.collect_open_data_csv(limit=100000)
             ccee_data["open_data"] = self._normalize_source(open_data)
 
             results["sources"]["ccee"] = ccee_data
 
-
-            # ---------------- Finalização ----------------
             end_time = datetime.now()
             results["metadata"]["collection_end"] = end_time.isoformat()
-            results["metadata"]["collection_duration"] = (
-                end_time - start_time
-            ).total_seconds()
-
-            results["metadata"]["overall_status"] = self._compute_overall_status(
-                results["sources"]
-            )
+            results["metadata"]["collection_duration"] = (end_time - start_time).total_seconds()
+            results["metadata"]["overall_status"] = self._compute_overall_status(results["sources"])
 
             self._persist(results)
             self._log_summary(results)
@@ -170,24 +292,11 @@ class KintuadiIntegratedCollectorV2:
             logger.error(f"Erro crítico na coleta: {e}", exc_info=True)
             return None
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
     def _normalize_source(self, source_data: Dict) -> Dict:
-        """
-        Garante que cada fonte tenha estrutura previsível:
-        - data
-        - statistics
-        - timeseries
-        - open_data_csv
-        - metadata (dict)
-        """
         normalized = dict(source_data)
-
         metadata = normalized.get("metadata", {})
         if hasattr(metadata, "to_dict"):
             metadata = metadata.to_dict()
-
         normalized["metadata"] = metadata
         return normalized
 
@@ -197,43 +306,29 @@ class KintuadiIntegratedCollectorV2:
             meta = src.get("metadata", {})
             if meta.get("status") == "success":
                 success += 1
-
         if success == len(sources):
             return "success"
         if success > 0:
             return "partial"
         return "error"
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
     def _persist(self, data: Dict):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
         complete_file = f"data/kintuadi_raw_{timestamp}.json"
         latest_file = "data/kintuadi_latest.json"
 
         with open(complete_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-
         with open(latest_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False, default=str)
 
-        logger.info(f"📁 Dados salvos:")
+        logger.info("📁 Dados salvos:")
         logger.info(f"  • {complete_file}")
         logger.info(f"  • {latest_file}")
 
-    # ------------------------------------------------------------------
-    # Logging
-    # ------------------------------------------------------------------
     def _log_summary(self, data: Dict):
         try:
-            ons_meta = (
-                data.get("sources", {})
-                .get("ons", {})
-                .get("metadata", {})
-            )
-
+            ons_meta = data.get("sources", {}).get("ons", {}).get("metadata", {})
             logger.info(
                 f"ONS | Datasets coletados: {ons_meta.get('datasets_collected', 'N/A')} | "
                 f"Status: {ons_meta.get('status', 'N/A')}"
@@ -241,26 +336,19 @@ class KintuadiIntegratedCollectorV2:
 
             ccee_src = data.get("sources", {}).get("ccee", {})
             pld_hist = ccee_src.get("pld_historical", {})
-            datasets = pld_hist.get("datasets", [])
-
-            for ds in datasets:
+            for ds in pld_hist.get("datasets", []):
                 year = ds.get("year")
                 stats = ds.get("statistics", {})
                 logger.info(
                     f"CCEE | {year} | PLD médio: {stats.get('pld_medio', 'N/A')} | "
                     f"Volatilidade: {stats.get('pld_std', 'N/A')}"
                 )
-
         except Exception as e:
             logger.warning(f"Erro ao gerar resumo: {e}")
 
-    # ------------------------------------------------------------------
-    # CLI helper
-    # ------------------------------------------------------------------
     def quick_collect(self):
         print("🚀 Iniciando coleta Kintuadi Energy v2...")
         results = self.collect_all()
-
         if not results:
             print("❌ Falha na coleta.")
             return None
