@@ -1917,6 +1917,7 @@ def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
     files = _find_ons_csv_all(ons, "CVU_Usina_Termica")
     if not files:
         return pd.Series(dtype=float)
+<<<<<<< codex/verify-metrics-in-core_analysis.py-sz05tl
 
     frames: List[pd.DataFrame] = []
     for cvu_file in files:
@@ -2021,6 +2022,112 @@ def _expand_cvu_weekly_to_daily(ons: Dict[str, Any]) -> pd.Series:
         for d in pd.date_range(start, end, freq="D"):
             daily_vals[d] = float(r["val_cvu"])
 
+=======
+
+    frames: List[pd.DataFrame] = []
+    for cvu_file in files:
+        try:
+            df = pd.read_csv(cvu_file, sep=None, engine="python")
+            needed = {"dat_iniciosemana", "dat_fimsemana", "val_cvu"}
+            if not needed.issubset(df.columns):
+                continue
+            df = df[["dat_iniciosemana", "dat_fimsemana", "val_cvu"]].copy()
+            df["dat_iniciosemana"] = _parse_date_series(df["dat_iniciosemana"])
+            df["dat_fimsemana"] = _parse_date_series(df["dat_fimsemana"])
+            df["val_cvu"] = _normalize_br_numeric_series(df["val_cvu"])
+            df = df.dropna(subset=["dat_iniciosemana", "dat_fimsemana", "val_cvu"])
+            df = df[df["val_cvu"] > 0]
+            if not df.empty:
+                frames.append(df)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.Series(dtype=float)
+
+    all_df = pd.concat(frames, ignore_index=True)
+    weekly = (
+        all_df.groupby(["dat_iniciosemana", "dat_fimsemana"], as_index=False)["val_cvu"]
+        .mean()
+        .sort_values("dat_fimsemana")
+    )
+    if weekly.empty:
+        return pd.Series(dtype=float)
+    return weekly.set_index("dat_fimsemana")["val_cvu"].astype(float)
+
+
+def _expand_cvu_weekly_to_daily(ons: Dict[str, Any]) -> pd.Series:
+    """Expande CVU semanal para valor diário no intervalo dat_iniciosemana..dat_fimsemana."""
+    con = _duckdb_connect()
+    if con is not None:
+        try:
+            if _duckdb_table_exists(con, "cvu_usina_termica"):
+                q = f"""
+                    SELECT
+                        {_duckdb_date_expr('dat_iniciosemana')} AS dat_iniciosemana,
+                        {_duckdb_date_expr('dat_fimsemana')} AS dat_fimsemana,
+                        AVG({_duckdb_num_expr('val_cvu')}) AS val_cvu
+                    FROM cvu_usina_termica
+                    GROUP BY 1,2
+                    HAVING dat_iniciosemana IS NOT NULL AND dat_fimsemana IS NOT NULL AND val_cvu > 0
+                """
+                wk = con.execute(q).fetchdf()
+                if not wk.empty:
+                    daily_vals: Dict[pd.Timestamp, float] = {}
+                    for _, r in wk.iterrows():
+                        start = pd.Timestamp(r["dat_iniciosemana"]).floor("D")
+                        end = pd.Timestamp(r["dat_fimsemana"]).floor("D")
+                        if end < start:
+                            start, end = end, start
+                        for d in pd.date_range(start, end, freq="D"):
+                            daily_vals[d] = float(r["val_cvu"])
+                    if daily_vals:
+                        return pd.Series(daily_vals).sort_index()
+        except Exception:
+            pass
+        finally:
+            con.close()
+
+    files = _find_ons_csv_all(ons, "CVU_Usina_Termica")
+    if not files:
+        return pd.Series(dtype=float)
+
+    frames: List[pd.DataFrame] = []
+    for cvu_file in files:
+        try:
+            df = pd.read_csv(cvu_file, sep=None, engine="python")
+            needed = {"dat_iniciosemana", "dat_fimsemana", "val_cvu"}
+            if not needed.issubset(df.columns):
+                continue
+            df = df[["dat_iniciosemana", "dat_fimsemana", "val_cvu"]].copy()
+            df["dat_iniciosemana"] = _parse_date_series(df["dat_iniciosemana"])
+            df["dat_fimsemana"] = _parse_date_series(df["dat_fimsemana"])
+            df["val_cvu"] = _normalize_br_numeric_series(df["val_cvu"])
+            df = df.dropna(subset=["dat_iniciosemana", "dat_fimsemana", "val_cvu"])
+            df = df[df["val_cvu"] > 0]
+            if not df.empty:
+                frames.append(df)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.Series(dtype=float)
+
+    wk = (
+        pd.concat(frames, ignore_index=True)
+        .groupby(["dat_iniciosemana", "dat_fimsemana"], as_index=False)["val_cvu"]
+        .mean()
+    )
+    daily_vals: Dict[pd.Timestamp, float] = {}
+    for _, r in wk.iterrows():
+        start = pd.Timestamp(r["dat_iniciosemana"]).floor("D")
+        end = pd.Timestamp(r["dat_fimsemana"]).floor("D")
+        if end < start:
+            start, end = end, start
+        for d in pd.date_range(start, end, freq="D"):
+            daily_vals[d] = float(r["val_cvu"])
+
+>>>>>>> main
     if not daily_vals:
         return pd.Series(dtype=float)
     return pd.Series(daily_vals).sort_index()
@@ -2268,7 +2375,14 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data", forc
             pld AS pld_hora,
             ano,
             mes,
+<<<<<<< codex/verify-metrics-in-core_analysis.py-sz05tl
+            hora,
+            dia,
+            mes_referencia,
+            periodo_comercializacao
+=======
             hora
+>>>>>>> main
         FROM pld_historical
         WHERE data IS NOT NULL AND pld IS NOT NULL
         ORDER BY data
@@ -2302,6 +2416,13 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data", forc
 
         # 4️⃣ Limpeza
         df_pld = df_pld.dropna(subset=["timestamp", "pld_hora"])
+
+
+        # Preenche granularidade CCEE quando ausente
+        if "dia" not in df_pld.columns or df_pld["dia"].isna().all():
+            df_pld["dia"] = pd.to_datetime(df_pld["timestamp"], errors="coerce").dt.day
+        if "mes_referencia" not in df_pld.columns or df_pld["mes_referencia"].isna().all():
+            df_pld["mes_referencia"] = pd.to_datetime(df_pld["timestamp"], errors="coerce").dt.strftime("%Y%m")
 
         if not df_pld.empty:
 

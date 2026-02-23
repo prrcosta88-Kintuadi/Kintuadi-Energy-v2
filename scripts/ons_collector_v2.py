@@ -6,9 +6,7 @@ import logging
 import csv
 import io
 import os
-import tempfile
 import requests
-from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 
@@ -298,13 +296,17 @@ class ONSCollectorV2:
         for name, url in self.OPEN_DATASETS:
             try:
                 logger.info(f"ONS | OpenData | {name}")
+<<<<<<< codex/verify-metrics-in-core_analysis.py-sz05tl
+                path, rows = self._fetch_and_save_open_data(url, name)
+=======
                 path, rows = self._fetch_and_save_csv(url, name)
+>>>>>>> main
                 if not path:
                     continue
 
                 datasets.append({
                     "dataset": name,
-                    "type": "csv",
+                    "type": "xlsx" if str(path).lower().endswith(".xlsx") else "csv",
                     "records": rows,
                     "file": path,
                     "origin": "open_data",
@@ -324,32 +326,13 @@ class ONSCollectorV2:
         }
 
 
-
-    # ==================================================================
-    # API pública
-    # ==================================================================
-
-        # ---------- API ENERGIA AGORA ----------
-        
-        datasets.extend(self._collect_api_series())
-
-        return {
-            "metadata": {
-                "source": "ONS",
-                "status": "success",
-                "datasets_collected": len(datasets),
-                "collection_time": start_time.isoformat(),
-            },
-            "datasets": datasets,
-        }
-
     # ==================================================================
     # Open Data helpers
     # ==================================================================
 
 
     
-    def _fetch_and_save_csv(self, url: str, dataset_name: str) -> Tuple[Optional[str], int]:
+    def _fetch_and_save_open_data(self, url: str, dataset_name: str) -> Tuple[Optional[str], int]:
 
         try:
             year = dataset_name.split("_")[-1].split("-")[0]
