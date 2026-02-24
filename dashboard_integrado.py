@@ -11,11 +11,11 @@ import glob
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import logging
 import streamlit.components.v1 as components
 from analises_tecnicas import mostrar_analises_tecnicas
-from scripts.core_analysis import build_core_analysis
+from scripts.core_analysis import build_core_analysis, calcular_indicadores_termicos_revisados
 from typing import Optional, Dict, List, Any, Union
 
 #metadata = core.get("metadata", {})
@@ -424,33 +424,91 @@ def load_latest_raw():
         print(f"DEBUG: Erro ao carregar dados brutos: {e}")
         return None
 
+def is_mirror_mode() -> bool:
+    return os.environ.get("KINTUADI_DASHBOARD_MODE", "integrado").lower() == "espelho"
+
+
 def load_core_analysis():
+    """
+    Modo integrado: SEMPRE executa build_core_analysis como primeira ação da sessão.
+    Modo espelho: nunca executa build; lê apenas core_analysis_latest.json.
+    """
+    cached_core = st.session_state.get("core_runtime")
+    if isinstance(cached_core, dict) and st.session_state.get("core_built_this_session"):
+        return cached_core
 
-    core_file = "data/core_analysis_latest.json"
+    core_file = os.path.join("data", "core_analysis_latest.json")
 
-    if not os.path.exists(core_file):
-        logger.info("Core não encontrado. Gerando automaticamente...")
+    # Modo espelho: somente leitura do core persistido
+    if is_mirror_mode():
+        if isinstance(cached_core, dict):
+            return cached_core
+        if os.path.exists(core_file):
+            try:
+                with open(core_file, "r", encoding="utf-8") as f:
+                    core = json.load(f)
+                if isinstance(core, dict):
+                    st.session_state["core_runtime"] = core
+                    return core
+            except Exception as e:
+                logger.warning(f"Falha ao carregar core_analysis_latest.json: {e}")
+        logger.error("Modo espelho: core_analysis_latest.json indisponível.")
+        return None
 
-        raw = load_latest_raw()
-        if not raw:
-            logger.error("Raw não disponível.")
-            return None
-
-        core = build_core_analysis(raw)
-
-        if not core:
-            logger.error("Falha ao gerar core.")
-            return None
-
-        return core
+    # Modo integrado: build obrigatório no bootstrap da sessão
+    raw = load_latest_raw()
+    if not raw:
+        logger.error("Dados brutos indisponíveis para executar build_core_analysis.")
+        return None
 
     try:
-        with open(core_file, "r", encoding="utf-8") as f:
-            return json.load(f)
+        logger.info("Executando build_core_analysis (ação obrigatória no bootstrap do dashboard_integrado)...")
+        core = build_core_analysis(raw, output_dir="data")
+
+        if isinstance(core, dict):
+            st.session_state["core_runtime"] = core
+            st.session_state["core_built_this_session"] = True
+            return core
+
+        logger.error("build_core_analysis retornou estrutura inválida.")
+        return None
 
     except Exception as e:
-        logger.error(f"Erro ao carregar core: {e}")
+        logger.error(f"Falha ao executar build_core_analysis: {e}")
+
+        # fallback de leitura local apenas para não derrubar UI
+        if os.path.exists(core_file):
+            try:
+                with open(core_file, "r", encoding="utf-8") as f:
+                    core = json.load(f)
+                if isinstance(core, dict):
+                    st.session_state["core_runtime"] = core
+                    return core
+            except Exception:
+                pass
         return None
+
+
+def diagnose_pipeline_status() -> Dict[str, str]:
+    """Diagnóstico simples por etapa (coleta → integração → análise)."""
+    status = {
+        "coleta": "erro",
+        "integracao": "erro",
+        "analise": "erro",
+    }
+
+    has_raw_latest = os.path.exists("data/kintuadi_latest.json")
+    has_any_raw = bool(glob.glob("data/kintuadi_*.json"))
+    has_core = os.path.exists("data/core_analysis_latest.json")
+
+    if has_raw_latest or has_any_raw:
+        status["coleta"] = "ok"
+        status["integracao"] = "ok"
+
+    if has_core:
+        status["analise"] = "ok"
+
+    return status
 
 
 def run_data_collector():
@@ -503,80 +561,6 @@ def run_data_collector():
         traceback.print_exc()
         st.error(f"Erro na coleta: {str(e)[:100]}...")
         return False
-
-def update_analysis():
-    """Atualiza a análise executando o coletor e gerando nova análise."""
-    import time
-    
-    with st.spinner("🔄 Atualizando dados do sistema..."):
-        try:
-            # Tentar importar e executar o coletor
-            try:
-                from run_collector import run_collector_v2
-                print("✅ Importado run_collector_v2")
-                success = run_collector_v2()
-            except ImportError as e:
-                print(f"❌ Erro ao importar run_collector_v2: {e}")
-                st.error(f"Erro ao importar coletor: {e}")
-                return None
-            except Exception as e:
-                print(f"❌ Erro ao executar run_collector_v2: {e}")
-                st.error(f"Erro na execução do coletor: {e}")
-                return None
-            
-            if not success:
-                st.error("❌ Coleta de dados falhou.")
-                return None
-            
-            # Pequena pausa para garantir que os arquivos foram salvos
-            time.sleep(2)
-            
-            # Carregar dados brutos atualizados
-            raw = load_latest_raw()
-            
-            if not raw:
-                st.error("❌ Não foi possível carregar dados após a coleta.")
-                # Listar arquivos em data/ para debug
-                if os.path.exists("data"):
-                    files = os.listdir("data")
-                    st.info(f"Arquivos em data/: {', '.join(files[:5])}{'...' if len(files) > 5 else ''}")
-                return None
-            
-            # Gerar nova análise
-            with st.spinner("📊 Gerando nova análise..."):
-                try:
-                    new_core = build_core_analysis(raw)
-                    
-                    if new_core:
-                        # Verificar se a análise tem estrutura básica
-                        required = ["timestamp", "hydrology", "prices"]
-                        missing = [key for key in required if key not in new_core]
-                        
-                        if missing:
-                            st.warning(f"⚠️ Análise gerada, mas faltam: {missing}")
-                        
-                        # Forçar salvamento do arquivo
-                        os.makedirs("data", exist_ok=True)
-                        with open("data/core_analysis_latest.json", "w", encoding="utf-8") as f:
-                            json.dump(new_core, f, indent=2, ensure_ascii=False, default=str)
-                        
-                        st.success(f"✅ Análise atualizada! Timestamp: {new_core.get('timestamp', 'N/A')}")
-                        return new_core
-                    else:
-                        st.error("❌ build_core_analysis retornou None")
-                        return None
-                        
-                except Exception as e:
-                    st.error(f"❌ Erro em build_core_analysis: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return None
-                    
-        except Exception as e:
-            st.error(f"❌ Erro inesperado em update_analysis: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
 def badge_status_sistema(classificacao: str, risco_sistêmico: str) -> str:
     """
@@ -637,9 +621,16 @@ def interpretar_razao_cvu_pld(percentual: Optional[float]) -> str:
 def analisar_formacao_preco_pld(core):
     """Analisa a formação do preço do PLD com base nas correlações."""
     mcp = core.get("mcp_economico", {})
+    adv = core.get("advanced_metrics", {})
     
-    corr_carga = mcp.get("correlacoes", {}).get("pld_vs_carga")
-    corr_hidro = mcp.get("correlacoes", {}).get("pld_vs_hidraulica")
+    # Nova abordagem: prioriza aderência físico-econômica do bloco avançado
+    corr_carga = adv.get("correlacoes", {}).get("pld_vs_carga_liquida")
+    if corr_carga is None:
+        corr_carga = mcp.get("correlacoes", {}).get("pld_vs_carga")
+
+    corr_hidro = adv.get("correlacoes", {}).get("pld_vs_ear_mensal")
+    if corr_hidro is None:
+        corr_hidro = mcp.get("correlacoes", {}).get("pld_vs_hidraulica")
     
     # Valores absolutos para análise de força
     abs_corr_carga = abs(corr_carga) if corr_carga is not None else 0
@@ -724,6 +715,309 @@ def analisar_formacao_preco_pld(core):
     
     return resultados, carga_analise, hidro_analise
 
+
+def _aggregate_hydro_period_from_daily(adv: Dict[str, Any], dt_ini: date, dt_fim: date) -> Dict[str, Any]:
+    """Agrega EAR/ENA a partir das séries diárias no período requisitado."""
+    out = {
+        "ear_media_periodo_sin": None,
+        "ena_media_periodo_sin": None,
+        "ear_media_periodo_por_submercado": {},
+        "ena_media_periodo_por_submercado": {},
+    }
+    if not isinstance(adv, dict):
+        return out
+
+    ini = pd.Timestamp(dt_ini)
+    fim = pd.Timestamp(dt_fim)
+
+    def _mean_dict(d: Dict[str, Any]) -> Optional[float]:
+        if not isinstance(d, dict) or not d:
+            return None
+        ser = pd.Series(d)
+        ser.index = pd.to_datetime(ser.index, errors="coerce")
+        ser = pd.to_numeric(ser, errors="coerce")
+        ser = ser[(ser.index >= ini) & (ser.index <= fim)].dropna()
+        return float(ser.mean()) if not ser.empty else None
+
+    out["ear_media_periodo_sin"] = _mean_dict(adv.get("ear_diaria_sin") or adv.get("ear_media_diaria") or {})
+    out["ena_media_periodo_sin"] = _mean_dict(adv.get("ena_diaria_sin") or adv.get("ena_media_diaria") or {})
+
+    ear_sub = adv.get("ear_diaria_por_submercado") or {}
+    ena_sub = adv.get("ena_diaria_por_submercado") or {}
+    if isinstance(ear_sub, dict):
+        for sm, d in ear_sub.items():
+            m = _mean_dict(d if isinstance(d, dict) else {})
+            if m is not None:
+                out["ear_media_periodo_por_submercado"][sm] = m
+    if isinstance(ena_sub, dict):
+        for sm, d in ena_sub.items():
+            m = _mean_dict(d if isinstance(d, dict) else {})
+            if m is not None:
+                out["ena_media_periodo_por_submercado"][sm] = m
+
+    return out
+
+
+def _compute_monthly_period_correlations(core: Dict[str, Any], dt_ini: date, dt_fim: date) -> Dict[str, Any]:
+    """Calcula correlações mensais por período selecionado e histórico total para comparação."""
+    result = {
+        "ok": False,
+        "erro": None,
+        "corr_periodo_carga": None,
+        "corr_periodo_ear": None,
+        "corr_total_carga": None,
+        "corr_total_ear": None,
+        "meses_no_periodo": 0,
+    }
+
+    try:
+        # PLD mensal a partir do bloco ccee.data
+        rows = ((core.get("ccee") or {}).get("data") or []) if isinstance(core, dict) else []
+        if not isinstance(rows, list) or not rows:
+            result["erro"] = "PLD indisponível no core."
+            return result
+
+        df = pd.DataFrame(rows)
+        required = {"mes_referencia", "dia", "hora", "pld_hora"}
+        if not required.issubset(df.columns):
+            result["erro"] = "Estrutura de PLD incompatível."
+            return result
+
+        df["mes_referencia"] = df["mes_referencia"].astype(str).str.zfill(6)
+        df["dia"] = pd.to_numeric(df["dia"], errors="coerce")
+        df["hora"] = pd.to_numeric(df["hora"], errors="coerce")
+        df["pld_hora"] = pd.to_numeric(df["pld_hora"], errors="coerce")
+        df["instante"] = (
+            pd.to_datetime(df["mes_referencia"] + "01", format="%Y%m%d", errors="coerce", utc=True).dt.tz_localize(None)
+            + pd.to_timedelta(df["dia"].fillna(1) - 1, unit="D")
+            + pd.to_timedelta(df["hora"].fillna(0), unit="h")
+        )
+        df = df.dropna(subset=["instante", "pld_hora"])
+        pld_m = df.set_index("instante")["pld_hora"].resample("ME").mean().dropna()
+
+        # EAR mensal derivado do EAR diário SIN (atende critério por período requisitado)
+        adv = core.get("advanced_metrics", {}) if isinstance(core, dict) else {}
+        ear_daily = adv.get("ear_diaria_sin") or adv.get("ear_media_diaria") or {}
+        ser_ear_d = pd.Series(ear_daily)
+        ser_ear_d.index = pd.to_datetime(ser_ear_d.index, errors="coerce")
+        ser_ear_d = pd.to_numeric(ser_ear_d, errors="coerce").dropna().sort_index()
+        ear_m = ser_ear_d.resample("ME").mean().dropna()
+
+        # Carga líquida mensal (derivada de operacao)
+        op = core.get("operacao", {}) if isinstance(core, dict) else {}
+        gen = op.get("generation", {}) if isinstance(op, dict) else {}
+        load = op.get("load", {}) if isinstance(op, dict) else {}
+
+        def _series_from_records(records, val_key):
+            if not isinstance(records, list) or not records:
+                return pd.Series(dtype=float)
+            dfr = pd.DataFrame(records)
+            if "instante" not in dfr.columns or val_key not in dfr.columns:
+                return pd.Series(dtype=float)
+            dfr["instante"] = pd.to_datetime(dfr["instante"], errors="coerce", utc=True).dt.tz_localize(None)
+            dfr[val_key] = pd.to_numeric(dfr[val_key], errors="coerce")
+            dfr = dfr.dropna(subset=["instante", val_key])
+            return dfr.set_index("instante")[val_key].sort_index()
+
+        carga = _series_from_records(((load.get("sin") or {}).get("serie") or []), "carga")
+        solar_key = next((k for k in gen.keys() if "solar" in str(k).lower()), None)
+        eolica_key = next((k for k in gen.keys() if "eolica" in str(k).lower()), None)
+        solar = _series_from_records(((gen.get(solar_key) or {}).get("serie") or []), "geracao") if solar_key else pd.Series(dtype=float)
+        eolica = _series_from_records(((gen.get(eolica_key) or {}).get("serie") or []), "geracao") if eolica_key else pd.Series(dtype=float)
+
+        carga_liq_m = pd.Series(dtype=float)
+        if not carga.empty:
+            renov = solar.add(eolica, fill_value=0)
+            carga_liq = carga.sub(renov, fill_value=float("nan"))
+            carga_liq_m = carga_liq.resample("ME").mean().dropna()
+
+        # Correlações históricas mensais
+        m_total = pd.DataFrame({"pld": pld_m, "ear": ear_m, "carga": carga_liq_m}).sort_index()
+        df_total_ear = m_total[["pld", "ear"]].dropna()
+        df_total_carga = m_total[["pld", "carga"]].dropna()
+        result["corr_total_ear"] = float(df_total_ear["pld"].corr(df_total_ear["ear"])) if len(df_total_ear) >= 3 else None
+        result["corr_total_carga"] = float(df_total_carga["pld"].corr(df_total_carga["carga"])) if len(df_total_carga) >= 3 else None
+
+        # Recorte do período selecionado (mensal)
+        m1 = pd.Timestamp(dt_ini).replace(day=1)
+        m2 = pd.Timestamp(dt_fim).replace(day=1) + pd.offsets.MonthEnd(0)
+        m_per = m_total[(m_total.index >= m1) & (m_total.index <= m2)]
+        result["meses_no_periodo"] = int(len(m_per.index.unique()))
+
+        if result["meses_no_periodo"] < 3:
+            result["erro"] = "Selecione um período com pelo menos 3 meses."
+            return result
+
+        df_per_ear = m_per[["pld", "ear"]].dropna()
+        df_per_carga = m_per[["pld", "carga"]].dropna()
+        result["corr_periodo_ear"] = float(df_per_ear["pld"].corr(df_per_ear["ear"])) if len(df_per_ear) >= 3 else None
+        result["corr_periodo_carga"] = float(df_per_carga["pld"].corr(df_per_carga["carga"])) if len(df_per_carga) >= 3 else None
+
+        result["ok"] = True
+        return result
+    except Exception as e:
+        result["erro"] = str(e)
+        return result
+
+
+def _compute_thermal_by_period(core: Dict[str, Any], dt_ini: date, dt_fim: date) -> Optional[Dict[str, Any]]:
+    """Recalcula análise térmica para o período selecionado."""
+    try:
+        if dt_fim < dt_ini:
+            return None
+
+        # PLD médio do período (a partir de ccee.data)
+        rows = ((core.get("ccee") or {}).get("data") or [])
+        if not isinstance(rows, list) or not rows:
+            return None
+        df = pd.DataFrame(rows)
+        req = {"mes_referencia", "dia", "hora", "pld_hora"}
+        if not req.issubset(df.columns):
+            return None
+        df["mes_referencia"] = df["mes_referencia"].astype(str).str.zfill(6)
+        df["dia"] = pd.to_numeric(df["dia"], errors="coerce")
+        df["hora"] = pd.to_numeric(df["hora"], errors="coerce")
+        df["pld_hora"] = pd.to_numeric(df["pld_hora"], errors="coerce")
+        df["instante"] = (
+            pd.to_datetime(df["mes_referencia"] + "01", format="%Y%m%d", errors="coerce", utc=True).dt.tz_localize(None)
+            + pd.to_timedelta(df["dia"].fillna(1) - 1, unit="D")
+            + pd.to_timedelta(df["hora"].fillna(0), unit="h")
+        )
+        dfi = df.dropna(subset=["instante", "pld_hora"])
+        dfi = dfi[(dfi["instante"] >= pd.Timestamp(dt_ini)) & (dfi["instante"] <= pd.Timestamp(dt_fim) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))]
+        if dfi.empty:
+            return None
+        pld_medio = float(dfi["pld_hora"].mean())
+
+        # CVU médio semanal no período (se disponível); fallback para valor de referência do core
+        thermal_base = core.get("thermal_analysis", {}) if isinstance(core, dict) else {}
+        cvu_diario = thermal_base.get("cvu_diario", {}) if isinstance(thermal_base, dict) else {}
+        cvu_semanal = thermal_base.get("cvu_semanal", {}) if isinstance(thermal_base, dict) else {}
+        cvu_medio = None
+        if isinstance(cvu_diario, dict) and cvu_diario:
+            sd = pd.Series({pd.to_datetime(k, errors="coerce"): v for k, v in cvu_diario.items()})
+            sd = pd.to_numeric(sd, errors="coerce").dropna()
+            sd = sd[(sd.index >= pd.Timestamp(dt_ini)) & (sd.index <= pd.Timestamp(dt_fim))]
+            if not sd.empty:
+                cvu_medio = float(sd.mean())
+
+        if cvu_medio is None and isinstance(cvu_semanal, dict) and cvu_semanal:
+            sw = pd.Series({pd.to_datetime(k, errors="coerce"): v for k, v in cvu_semanal.items()})
+            sw = pd.to_numeric(sw, errors="coerce").dropna()
+            sw = sw[(sw.index >= pd.Timestamp(dt_ini)) & (sw.index <= pd.Timestamp(dt_fim))]
+            if not sw.empty:
+                cvu_medio = float(sw.mean())
+
+        if cvu_medio is None:
+            cvu_medio = ((thermal_base.get("dados_referencia") or {}).get("cvu_medio")) if isinstance(thermal_base, dict) else None
+
+        # EAR médio do período (diário se disponível)
+        adv = core.get("advanced_metrics", {}) if isinstance(core, dict) else {}
+        ear_diario = adv.get("ear_media_diaria", {}) if isinstance(adv, dict) else {}
+        ear_medio = None
+        if isinstance(ear_diario, dict) and ear_diario:
+            se = pd.Series({pd.to_datetime(k, errors="coerce"): v for k, v in ear_diario.items()})
+            se = pd.to_numeric(se, errors="coerce").dropna()
+            se = se[(se.index >= pd.Timestamp(dt_ini)) & (se.index <= pd.Timestamp(dt_fim))]
+            if not se.empty:
+                ear_medio = float(se.mean())
+        if ear_medio is None:
+            ear_medio = ((core.get("hydrology") or {}).get("ear_medio")) if isinstance(core, dict) else None
+
+        return calcular_indicadores_termicos_revisados(pld_medio=pld_medio, cvu_medio=cvu_medio, ear_medio=ear_medio)
+    except Exception:
+        return None
+
+
+def _normalize_submercado_dashboard(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    v = str(value).strip().upper().replace("/", "").replace("-", "").replace(" ", "")
+    mapping = {
+        "1": "SUDESTE", "2": "SUL", "3": "NORDESTE", "4": "NORTE",
+        "N": "NORTE", "NE": "NORDESTE", "SE": "SUDESTE", "SECO": "SUDESTE", "S": "SUL",
+        "NORTE": "NORTE", "NORDESTE": "NORDESTE", "SUDESTE": "SUDESTE", "SUL": "SUL",
+    }
+    return mapping.get(v)
+
+
+def _classificar_cenario_horario(pld: Optional[float], ear_mensal: Optional[float], termica_mensal: Optional[float], pld_medio_global: Optional[float]) -> str:
+    if pld is None or ear_mensal is None:
+        return "dados_insuficientes"
+    if pld >= 785.27 * 0.8 and ear_mensal < 50:
+        return "estresse_hidrico"
+    if pld <= 57.31 * 1.2 and ear_mensal > 65:
+        return "abundancia_hidrica"
+    if termica_mensal is not None and termica_mensal > 25 and pld_medio_global is not None and pld > pld_medio_global:
+        return "pressao_termica"
+    return "equilibrio_operacional"
+
+
+def build_hourly_scenario_table(core: Dict[str, Any], selected_day: datetime.date, submercado: str = "SIN") -> pd.DataFrame:
+    ccee = core.get("ccee", {}) if isinstance(core, dict) else {}
+    rows = ccee.get("data", []) if isinstance(ccee, dict) else []
+    if not isinstance(rows, list) or not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    required = {"mes_referencia", "dia", "hora", "pld_hora", "submercado"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    df["mes_referencia"] = df["mes_referencia"].astype(str).str.zfill(6)
+    df["dia"] = pd.to_numeric(df["dia"], errors="coerce")
+    df["hora"] = pd.to_numeric(df["hora"], errors="coerce")
+    df["pld_hora"] = pd.to_numeric(df["pld_hora"], errors="coerce")
+    df["submercado_norm"] = df["submercado"].map(_normalize_submercado_dashboard)
+
+    df["instante"] = (
+        pd.to_datetime(df["mes_referencia"] + "01", format="%Y%m%d", errors="coerce")
+        + pd.to_timedelta(df["dia"].fillna(1) - 1, unit="D")
+        + pd.to_timedelta(df["hora"].fillna(0), unit="h")
+    )
+    df = df.dropna(subset=["instante", "pld_hora"])
+
+    if submercado != "SIN":
+        df = df[df["submercado_norm"] == submercado]
+
+    day_ts = pd.Timestamp(selected_day)
+    df = df[df["instante"].dt.floor("D") == day_ts]
+    if df.empty:
+        return pd.DataFrame()
+
+    hourly = df.groupby(df["instante"].dt.floor("h"))["pld_hora"].mean().reset_index()
+    hourly = hourly.rename(columns={"pld_hora": "pld_hora_medio"})
+
+    adv = core.get("advanced_metrics", {}) if isinstance(core, dict) else {}
+    month_key = day_ts.strftime("%Y-%m")
+    day_key = day_ts.strftime("%Y-%m-%d")
+    ear_mensal = (adv.get("ear_diaria_sin") or adv.get("ear_media_diaria") or {}).get(day_key)
+    ena_mensal = (adv.get("ena_diaria_sin") or adv.get("ena_media_diaria") or {}).get(day_key)
+
+    termica_mensal = None
+    for row in (adv.get("matriz_cenario_mensal") or []):
+        if isinstance(row, dict) and row.get("mes") == month_key:
+            termica_mensal = row.get("percentual_termica_medio")
+            break
+
+    pld_medio_global = (core.get("prices") or {}).get("pld_medio")
+
+    hourly["ear_mensal"] = ear_mensal
+    hourly["ena_mensal"] = ena_mensal
+    hourly["percentual_termica_mensal"] = termica_mensal
+    hourly["cenario"] = hourly["pld_hora_medio"].apply(
+        lambda p: _classificar_cenario_horario(
+            float(p) if pd.notna(p) else None,
+            float(ear_mensal) if ear_mensal is not None else None,
+            float(termica_mensal) if termica_mensal is not None else None,
+            float(pld_medio_global) if pld_medio_global is not None else None,
+        )
+    )
+
+    hourly = hourly.rename(columns={"instante": "hora"})
+    return hourly
+
+
 # -----------------------------------------------------------------------------
 # MAIN
 # -----------------------------------------------------------------------------
@@ -731,12 +1025,14 @@ def main():
     # Carregar CSS dinâmico
     css = load_custom_css()
     st.markdown(css, unsafe_allow_html=True)
-
-    # Inicializar session state para controle de atualização
-    if 'updating' not in st.session_state:
-        st.session_state.updating = False
-    if 'last_update' not in st.session_state:
-        st.session_state.last_update = None
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"], [data-testid="collapsedControl"] {display:none !important;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     with st.sidebar:
         st.markdown("## ⚡ **KINTUADI**")
@@ -774,72 +1070,25 @@ def main():
                     st.success(f"✓ Dados de: {formatted_time}")
                 except:
                     st.success(f"✓ Dados disponíveis")
-            
-            # Botão de atualização
-            if st.session_state.updating:
-                st.warning("🔄 Atualizando dados...")
-                if st.button("⏸️ Cancelar Atualização", disabled=True):
-                    st.session_state.updating = False
-            else:
-                if st.button("🔄 Atualizar Dados Agora", type="primary", use_container_width=True):
-                    raw = load_latest_raw()
-                    build_core_analysis(raw)
-                    st.session_state.updating = True
-                    st.rerun()
+
+            st.info("🔒 Dashboard em modo somente leitura.")
             
             st.markdown("---")
             
         else:
             st.error("❌ Análise não disponível")
             st.markdown("---")
-            
-            # Botão para tentar gerar análise
-            if st.button("🔧 Gerar Análise Inicial", type="primary", use_container_width=True):
-                with st.spinner("Gerando análise inicial..."):
-                    raw = load_latest_raw()
-                    if raw:
-                        new_core = build_core_analysis(raw)
-                        if new_core:
-                            st.success("✅ Análise gerada com sucesso!")
-                            st.rerun()
-                        else:
-                            st.error("❌ Falha ao gerar análise.")
-                    else:
-                        st.error("❌ Dados brutos não disponíveis.")
+
+            status = diagnose_pipeline_status()
+            st.markdown("**Diagnóstico por etapa:**")
+            st.write(f"• Coleta: {'✅' if status['coleta']=='ok' else '❌'}")
+            st.write(f"• Integração: {'✅' if status['integracao']=='ok' else '❌'}")
+            st.write(f"• Análise (core): {'✅' if status['analise']=='ok' else '❌'}")
+
+            st.caption("Execute a coleta/integrador externamente e gere o core antes de abrir o dashboard.")
         
         st.markdown("---")
         st.caption("Versão 2.0 • Dados em tempo real")
-
-    # Se está atualizando, mostrar tela de atualização
-    if st.session_state.updating:
-        st.markdown("# 🔄 Atualizando Dados do Sistema")
-        st.markdown("---")
-        
-        with st.spinner("Executando coletor de dados e gerando nova análise..."):
-            # Executar atualização
-            new_core = update_analysis()
-            
-            # Atualizar estado
-            st.session_state.updating = False
-            st.session_state.last_update = datetime.now()
-            
-            if new_core:
-                st.success("✅ Atualização concluída com sucesso!")
-                st.balloons()
-                
-                # Recarregar a página após 2 segundos
-                st.info("📋 Recarregando dashboard...")
-                st.rerun()
-            else:
-                st.error("❌ Falha na atualização.")
-                if st.button("↻ Tentar Novamente"):
-                    st.session_state.updating = True
-                    st.rerun()
-                if st.button("📊 Voltar ao Dashboard"):
-                    st.session_state.updating = False
-                    st.rerun()
-        
-        return
 
     # Se não tem core carregado, mostrar erro
     if not core:
@@ -847,13 +1096,14 @@ def main():
         st.markdown("""
         Não foi possível carregar a análise do sistema. Por favor:
         
-        1. **Execute o coletor de dados** primeiro
-        2. Ou clique no botão "Gerar Análise Inicial" na sidebar
-        3. Ou verifique se o arquivo `data/core_analysis_latest.json` existe
+        1. **Execute o coletor integrado** primeiro
+        2. **Gere o core_analysis** a partir do raw coletado
+        3. Verifique se o arquivo `data/core_analysis_latest.json` existe
         
-        Para executar o coletor manualmente:
+        Fluxo recomendado:
         ```bash
-        python coletor_unificado.py
+        python run_collector.py
+        # depois gere o core (pipeline de análise)
         ```
         """)
         return
@@ -1002,17 +1252,45 @@ def main():
     
     with col1:
         mcp = core.get("mcp_economico", {})
+        adv = core.get("advanced_metrics", {})
         corr = mcp.get("correlacoes", {})
         
-        corr_carga = corr.get("pld_vs_carga")
-        corr_hidro = corr.get("pld_vs_hidraulica")
+        corr_carga = adv.get("correlacoes", {}).get("pld_vs_carga_liquida")
+        if corr_carga is None:
+            corr_carga = corr.get("pld_vs_carga")
+
+        corr_hidro = adv.get("correlacoes", {}).get("pld_vs_ear_mensal")
+        if corr_hidro is None:
+            corr_hidro = corr.get("pld_vs_hidraulica")
         
-        st.metric("PLD vs Carga", f"{corr_carga:.2f}" if corr_carga is not None else "—")
+        st.metric("PLD vs Carga Líquida", f"{corr_carga:.2f}" if corr_carga is not None else "—")
         st.caption(carga_analise)
         
     with col2:
-        st.metric("PLD vs Hidrologia", f"{corr_hidro:.2f}" if corr_hidro is not None else "—")
+        st.metric("PLD vs EAR (mensal)", f"{corr_hidro:.2f}" if corr_hidro is not None else "—")
         st.caption(hidro_analise)
+
+    st.markdown("**Comparar correlações mensais por período selecionado (mín. 3 meses):**")
+    pr1, pr2, pr3 = st.columns([1, 1, 2])
+    with pr1:
+        corr_ini = st.date_input("Início (mensal)", value=datetime.now().date().replace(day=1) - timedelta(days=180), key="corr_period_ini")
+    with pr2:
+        corr_fim = st.date_input("Fim (mensal)", value=datetime.now().date(), key="corr_period_fim")
+    with pr3:
+        run_corr = st.button("Comparar correlações do período", key="btn_corr_period")
+
+    if run_corr:
+        cmp = _compute_monthly_period_correlations(core, corr_ini, corr_fim)
+        if not cmp.get("ok"):
+            st.warning(cmp.get("erro") or "Não foi possível calcular as correlações por período.")
+        else:
+            cpa, cpb = st.columns(2)
+            with cpa:
+                st.metric("PLD vs Carga Líquida (período)", f"{cmp.get('corr_periodo_carga'):.2f}" if cmp.get("corr_periodo_carga") is not None else "—")
+                st.caption(f"Histórico total mensal: {cmp.get('corr_total_carga'):.2f}" if cmp.get("corr_total_carga") is not None else "Histórico total mensal: —")
+            with cpb:
+                st.metric("PLD vs EAR (período)", f"{cmp.get('corr_periodo_ear'):.2f}" if cmp.get("corr_periodo_ear") is not None else "—")
+                st.caption(f"Histórico total mensal: {cmp.get('corr_total_ear'):.2f}" if cmp.get("corr_total_ear") is not None else "Histórico total mensal: —")
     
     st.markdown("---")
     st.markdown(f"### 📈 **Análise Integrada**")
@@ -1031,13 +1309,198 @@ def main():
     st.markdown('</div>', unsafe_allow_html=True)
 
     # =========================================================================
+    # NOVA CAMADA FÍSICO-ECONÔMICA (ADVANCED METRICS)
+    # =========================================================================
+    st.markdown('<div class="section-title">🧠 Aderência Físico-Econômica e Regime Estrutural</div>', unsafe_allow_html=True)
+    adv = core.get("advanced_metrics", {})
+
+    if adv:
+        ader = adv.get("aderencia_fisico_economica", {})
+        capr = adv.get("capacidade_operativa_real", {})
+        cls = adv.get("classificacoes", {})
+        idxr = adv.get("indices_renovaveis", {})
+
+        # Período default: último mês fechado (cards c1..c7)
+        today = datetime.now().date()
+        first_day_this_month = today.replace(day=1)
+        last_closed_end = first_day_this_month - timedelta(days=1)
+        last_closed_start = last_closed_end.replace(day=1)
+
+        if "adv_period_ini" not in st.session_state:
+            st.session_state["adv_period_ini"] = last_closed_start
+        if "adv_period_fim" not in st.session_state:
+            st.session_state["adv_period_fim"] = last_closed_end
+
+        p1, p2, p3 = st.columns([1, 1, 1])
+        with p1:
+            dt_ini = st.date_input("Início", value=st.session_state["adv_period_ini"], key="adv_period_ini")
+        with p2:
+            dt_fim = st.date_input("Fim", value=st.session_state["adv_period_fim"], key="adv_period_fim")
+        with p3:
+            run_period = st.button("Verificar métricas", key="btn_verificar_metricas")
+
+        if run_period:
+            st.session_state["adv_period_ini"] = dt_ini
+            st.session_state["adv_period_fim"] = dt_fim
+
+        dt_ini = st.session_state["adv_period_ini"]
+        dt_fim = st.session_state["adv_period_fim"]
+        st.caption(f"Período ativo dos cards: **{dt_ini.strftime('%Y-%m-%d')}** até **{dt_fim.strftime('%Y-%m-%d')}**")
+
+        hydro_period = _aggregate_hydro_period_from_daily(adv, dt_ini, dt_fim)
+
+        mtx_d = pd.DataFrame(adv.get("matriz_cenario_diaria", []))
+        if not mtx_d.empty and "dia" in mtx_d.columns:
+            mtx_d["dia_dt"] = pd.to_datetime(mtx_d["dia"], errors="coerce")
+            mtx_d = mtx_d[(mtx_d["dia_dt"] >= pd.Timestamp(dt_ini)) & (mtx_d["dia_dt"] <= pd.Timestamp(dt_fim))]
+
+        def _mean_col(df, col):
+            if df.empty or col not in df.columns:
+                return None
+            v = pd.to_numeric(df[col], errors="coerce").dropna()
+            return float(v.mean()) if not v.empty else None
+
+        gfom_pct_show = _mean_col(mtx_d, "gfom_pct") or ader.get("gfom_pct")
+        gfom_corr_show = _mean_col(mtx_d, "gfom_vs_pld_corr") if not mtx_d.empty else ader.get("gfom_vs_pld_corr")
+        stress_show = _mean_col(mtx_d, "stress_operacional_medio") or capr.get("stress_operacional_medio")
+        ipr_show = _mean_col(mtx_d, "ipr_medio") or idxr.get("ipr_medio")
+        isr_show = _mean_col(mtx_d, "isr_medio") or idxr.get("isr_medio")
+
+        curt_show = cls.get("curtailment_estrutural_vs_eletrico", "-")
+        if not mtx_d.empty and "curtailment_estado" in mtx_d.columns:
+            mode_c = mtx_d["curtailment_estado"].dropna()
+            if not mode_c.empty:
+                curt_show = mode_c.mode().iloc[0]
+
+        abund_show = adv.get("regime_abundancia")
+        if not mtx_d.empty and "regime_abundancia" in mtx_d.columns:
+            s_ab = mtx_d["regime_abundancia"].dropna()
+            if not s_ab.empty:
+                abund_show = bool((s_ab == True).mean() >= 0.5)
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("%GFOM", f"{gfom_pct_show:.2f}%" if gfom_pct_show is not None else "-")
+            st.caption("Média diária no período ativo: ΣGFOM/ΣGeração")
+        with c2:
+            st.metric("GFOM × PLD", f"{gfom_corr_show:.2f}" if gfom_corr_show is not None else "-")
+            st.caption((ader.get("gfom_vs_pld_cenario", "-") or "-") + " | 0E-8 e notação científica tratados como 0.")
+        with c3:
+            st.metric("Curtailment", curt_show)
+            st.caption("Estado dominante diário no período")
+        with c4:
+            st.metric("Stress Operacional", f"{stress_show:.3f}" if stress_show is not None else "-")
+            st.caption("Média diária de carga/capacidade")
+
+        c5, c6, c7 = st.columns(3)
+        with c5:
+            st.metric("IPR médio", f"{ipr_show:.3f}" if ipr_show is not None else "-")
+        with c6:
+            st.metric("ISR médio", f"{isr_show:.3f}" if isr_show is not None else "-")
+        with c7:
+            st.metric("Regime abundância", "Sim" if abund_show else "Não" if abund_show is not None else "-")
+
+        st.markdown("**Hidrologia média no período requisitado (a partir de EAR/ENA diários):**")
+        h1, h2 = st.columns(2)
+        with h1:
+            st.metric("EAR médio (SIN) período", f"{hydro_period.get('ear_media_periodo_sin'):.2f}" if hydro_period.get("ear_media_periodo_sin") is not None else "-")
+        with h2:
+            st.metric("ENA média (SIN) período", f"{hydro_period.get('ena_media_periodo_sin'):.2f}" if hydro_period.get("ena_media_periodo_sin") is not None else "-")
+
+        if hydro_period.get("ear_media_periodo_por_submercado") or hydro_period.get("ena_media_periodo_por_submercado"):
+            subs = sorted(set(list((hydro_period.get("ear_media_periodo_por_submercado") or {}).keys()) + list((hydro_period.get("ena_media_periodo_por_submercado") or {}).keys())))
+            df_h = pd.DataFrame({
+                "Submercado": subs,
+                "EAR médio período": [ (hydro_period.get("ear_media_periodo_por_submercado") or {}).get(s) for s in subs],
+                "ENA média período": [ (hydro_period.get("ena_media_periodo_por_submercado") or {}).get(s) for s in subs],
+            })
+            st.dataframe(df_h, width="stretch", hide_index=True)
+
+        if not mtx_d.empty:
+            st.markdown("**Matriz diária das métricas (c1..c7) no período selecionado:**")
+            st.dataframe(mtx_d.drop(columns=["dia_dt"], errors="ignore"), width="stretch", hide_index=True)
+
+        regime_trimestral = adv.get("mudanca_regime_historica_trimestral", {})
+        if regime_trimestral:
+            st.markdown("**Mudança de regime histórica (trimestral):**")
+            df_reg = pd.DataFrame(
+                [{"Trimestre": k, "Regime": v} for k, v in regime_trimestral.items()]
+            ).sort_values("Trimestre")
+            st.dataframe(df_reg, use_container_width=True, hide_index=True)
+
+        margem_media_m = capr.get("margem_operativa_media_mensal", {})
+        margem_p5_m = capr.get("margem_operativa_p5_mensal", {})
+        if margem_media_m or margem_p5_m:
+            rows = sorted(set(list(margem_media_m.keys()) + list(margem_p5_m.keys())))
+            df_marg = pd.DataFrame({
+                "Mes": rows,
+                "Margem média": [margem_media_m.get(r) for r in rows],
+                "Margem p5": [margem_p5_m.get(r) for r in rows],
+            })
+            st.markdown("**Margem operativa real (mensal):**")
+            st.dataframe(df_marg, width="stretch", hide_index=True)
+
+        with st.expander("📘 Conceitos e critérios das métricas avançadas"):
+            met = adv.get("metodologia", {})
+            st.markdown("**GFOM vs PLD**")
+            st.write(met.get("gfom_vs_pld", "GFOM% = GFOM/geração verificada; correlação com PLD horário alinhado."))
+            st.markdown("**Margem operativa real (mensal)**")
+            st.write(met.get("margem_operativa_real", "Margem média = média horária mensal; Margem p5 = percentil 5% mensal."))
+            st.markdown("**Curtailment (operacional/elétrico/estrutural)**")
+            st.write(met.get("curtailment", "Critérios operacionais combinando intercâmbio, IPR, EAR e PLD."))
+            st.markdown("**IPR / ISR**")
+            st.write(met.get("ipr_isr", "IPR e ISR medem penetração renovável em relação à carga e carga líquida."))
+            st.markdown("**Regime de abundância**")
+            st.write(met.get("regime_abundancia", "Critério baseado em dependência térmica, EAR e PLD."))
+            st.markdown("**Mudança de regime (trimestral)**")
+            st.write(met.get("mudanca_regime_trimestral", "Classificação trimestral por stress e PLD."))
+
+        st.markdown("**Consulta horária por dia (sem reprocessar o build_core_analysis):**")
+        c_sel1, c_sel2 = st.columns([1, 1])
+        with c_sel1:
+            dia_consulta = st.date_input(
+                "Selecione o dia",
+                value=datetime.now().date(),
+                key="dia_consulta_horaria",
+                help="A consulta lê apenas o core_analysis_latest.json carregado.",
+            )
+        with c_sel2:
+            sub_opt = st.selectbox(
+                "Submercado",
+                options=["SIN", "NORTE", "NORDESTE", "SUDESTE", "SUL"],
+                index=0,
+                key="submercado_consulta_horaria",
+            )
+
+        df_horario = build_hourly_scenario_table(core, dia_consulta, submercado=sub_opt)
+        if not df_horario.empty:
+            st.dataframe(df_horario, width="stretch", hide_index=True)
+        else:
+            st.info("Sem dados horários no dia/submercado selecionado dentro do core carregado.")
+    else:
+        st.info("Métricas avançadas indisponíveis no core.")
+
+    # =========================================================================
     # ANÁLISE TÉRMICA COM DUPLA PERSPECTIVA - REVISADA
     # =========================================================================
     st.markdown('<div class="section-title">🔥 Análise Térmica - Dupla Perspectiva</div>', unsafe_allow_html=True)
-    
-    thermal = core.get("thermal_analysis", {})
-    
+
+    t1, t2, t3 = st.columns([1, 1, 1])
+    today = datetime.now().date()
+    with t1:
+        thermal_ini = st.date_input("Período térmico - início", value=today - timedelta(days=30), key="thermal_period_ini")
+    with t2:
+        thermal_fim = st.date_input("Período térmico - fim", value=today, key="thermal_period_fim")
+    with t3:
+        run_thermal = st.button("Verificar análise térmica", key="btn_thermal_period")
+
+    thermal = st.session_state.get("thermal_period_result") if not run_thermal else None
+    if run_thermal:
+        thermal = _compute_thermal_by_period(core, thermal_ini, thermal_fim)
+        st.session_state["thermal_period_result"] = thermal
+
     if thermal:
+        st.caption(f"Análise térmica calculada para o período {thermal_ini.strftime('%Y-%m-%d')} a {thermal_fim.strftime('%Y-%m-%d')}.")
         # Informação de versão da análise
         metadata = core.get("metadata", {})
         if metadata.get("correcao_conceitual"):
@@ -1150,7 +1613,7 @@ def main():
             st.markdown('</div>', unsafe_allow_html=True)
         
     else:
-        st.warning("Dados de análise térmica não disponíveis.")
+        st.info("Selecione o período e clique em **Verificar análise térmica** para exibir os resultados.")
 
     # =========================================================================
     # RESUMO OPERACIONAL (ENERGIA AGORA)
@@ -1471,6 +1934,7 @@ def main():
         st.plotly_chart(fig, use_container_width=True)
 
     # PREMIUM - análise personalizada
+    premium_result = None  # placeholder: fluxo premium ainda não conectado nesta versão
     st.markdown("---")
     st.header("👤 PREMIUM — Visão Personalizada")
     if premium_result is None:
@@ -1478,46 +1942,6 @@ def main():
     else:
         st.info("Série temporal de PLD indisponível.")
     
-    # =========================================================================
-    # MCP ECONÔMICO
-    # =========================================================================
-    st.markdown('<div class="section-title">📊 MCP Econômico</div>', unsafe_allow_html=True)
-    mcp = core.get("mcp_economico", {})
-
-    if mcp:
-        c1, c2, c3 = st.columns(3)
-
-        with c1:
-            st.markdown(
-            f"""
-<div class="insight-card">
-<h4>Regime do MCP</h4>
-<div class="kpi-value">{mcp.get("regime_mcp", "—")}</div>
-<p>{mcp.get("descricao", "")}</p>
-</div>
-""",
-            unsafe_allow_html=True,
-            )
-
-        with c2:
-            correlacoes = mcp.get("correlacoes", {})
-            st.metric(
-                "PLD vs Carga",
-                f"{correlacoes.get('pld_vs_carga', 0):.2f}"
-                if correlacoes.get("pld_vs_carga") is not None
-                else "—"
-            )
-
-        with c3:
-            st.metric(
-                "PLD vs Hidrologia",
-                f"{correlacoes.get('pld_vs_hidraulica', 0):.2f}"
-                if correlacoes.get("pld_vs_hidraulica") is not None
-                else "—"
-            )
-    else:
-        st.info("Dados de MCP indisponíveis.")
-
     # =========================================================================
     # LIMITES REGULATÓRIOS
     # =========================================================================
@@ -1549,9 +1973,16 @@ def main():
         st.json(core.get("metadata", {}))
 
     st.markdown("---")
+    meta = core.get("metadata", {}) if isinstance(core, dict) else {}
+    ultima_atualizacao = (
+        meta.get("generated_at")
+        or core.get("timestamp")
+        or "N/A"
+    )
+
     st.caption(f"""
     ⚡ **Kintuadi Energy Platform v2.0** | Dados em tempo real | 
-    Última atualização: {data['metadata'].get('timestamp', 'N/A')} | 
+    Última atualização: {ultima_atualizacao} | 
     Desenvolvido para gestores de energia
     """)
 
