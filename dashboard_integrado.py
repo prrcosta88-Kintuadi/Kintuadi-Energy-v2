@@ -716,6 +716,48 @@ def analisar_formacao_preco_pld(core):
     return resultados, carga_analise, hidro_analise
 
 
+def _aggregate_hydro_period_from_daily(adv: Dict[str, Any], dt_ini: date, dt_fim: date) -> Dict[str, Any]:
+    """Agrega EAR/ENA a partir das séries diárias no período requisitado."""
+    out = {
+        "ear_media_periodo_sin": None,
+        "ena_media_periodo_sin": None,
+        "ear_media_periodo_por_submercado": {},
+        "ena_media_periodo_por_submercado": {},
+    }
+    if not isinstance(adv, dict):
+        return out
+
+    ini = pd.Timestamp(dt_ini)
+    fim = pd.Timestamp(dt_fim)
+
+    def _mean_dict(d: Dict[str, Any]) -> Optional[float]:
+        if not isinstance(d, dict) or not d:
+            return None
+        ser = pd.Series(d)
+        ser.index = pd.to_datetime(ser.index, errors="coerce")
+        ser = pd.to_numeric(ser, errors="coerce")
+        ser = ser[(ser.index >= ini) & (ser.index <= fim)].dropna()
+        return float(ser.mean()) if not ser.empty else None
+
+    out["ear_media_periodo_sin"] = _mean_dict(adv.get("ear_diaria_sin") or adv.get("ear_media_diaria") or {})
+    out["ena_media_periodo_sin"] = _mean_dict(adv.get("ena_diaria_sin") or adv.get("ena_media_diaria") or {})
+
+    ear_sub = adv.get("ear_diaria_por_submercado") or {}
+    ena_sub = adv.get("ena_diaria_por_submercado") or {}
+    if isinstance(ear_sub, dict):
+        for sm, d in ear_sub.items():
+            m = _mean_dict(d if isinstance(d, dict) else {})
+            if m is not None:
+                out["ear_media_periodo_por_submercado"][sm] = m
+    if isinstance(ena_sub, dict):
+        for sm, d in ena_sub.items():
+            m = _mean_dict(d if isinstance(d, dict) else {})
+            if m is not None:
+                out["ena_media_periodo_por_submercado"][sm] = m
+
+    return out
+
+
 def _compute_monthly_period_correlations(core: Dict[str, Any], dt_ini: date, dt_fim: date) -> Dict[str, Any]:
     """Calcula correlações mensais por período selecionado e histórico total para comparação."""
     result = {
@@ -753,11 +795,13 @@ def _compute_monthly_period_correlations(core: Dict[str, Any], dt_ini: date, dt_
         df = df.dropna(subset=["instante", "pld_hora"])
         pld_m = df.set_index("instante")["pld_hora"].resample("ME").mean().dropna()
 
-        # EAR mensal já pronto no advanced_metrics
+        # EAR mensal derivado do EAR diário SIN (atende critério por período requisitado)
         adv = core.get("advanced_metrics", {}) if isinstance(core, dict) else {}
-        ear_dict = adv.get("ear_media_mensal") or {}
-        ear_m = pd.Series({pd.to_datetime(k + "-01", errors="coerce") + pd.offsets.MonthEnd(0): v for k, v in ear_dict.items()})
-        ear_m = pd.to_numeric(ear_m, errors="coerce").dropna().sort_index()
+        ear_daily = adv.get("ear_diaria_sin") or adv.get("ear_media_diaria") or {}
+        ser_ear_d = pd.Series(ear_daily)
+        ser_ear_d.index = pd.to_datetime(ser_ear_d.index, errors="coerce")
+        ser_ear_d = pd.to_numeric(ser_ear_d, errors="coerce").dropna().sort_index()
+        ear_m = ser_ear_d.resample("ME").mean().dropna()
 
         # Carga líquida mensal (derivada de operacao)
         op = core.get("operacao", {}) if isinstance(core, dict) else {}
@@ -947,8 +991,8 @@ def build_hourly_scenario_table(core: Dict[str, Any], selected_day: datetime.dat
     adv = core.get("advanced_metrics", {}) if isinstance(core, dict) else {}
     month_key = day_ts.strftime("%Y-%m")
     day_key = day_ts.strftime("%Y-%m-%d")
-    ear_mensal = (adv.get("ear_media_diaria") or {}).get(day_key)
-    ena_mensal = (adv.get("ena_media_diaria") or {}).get(day_key)
+    ear_mensal = (adv.get("ear_diaria_sin") or adv.get("ear_media_diaria") or {}).get(day_key)
+    ena_mensal = (adv.get("ena_diaria_sin") or adv.get("ena_media_diaria") or {}).get(day_key)
 
     termica_mensal = None
     for row in (adv.get("matriz_cenario_mensal") or []):
@@ -1303,6 +1347,8 @@ def main():
         dt_fim = st.session_state["adv_period_fim"]
         st.caption(f"Período ativo dos cards: **{dt_ini.strftime('%Y-%m-%d')}** até **{dt_fim.strftime('%Y-%m-%d')}**")
 
+        hydro_period = _aggregate_hydro_period_from_daily(adv, dt_ini, dt_fim)
+
         mtx_d = pd.DataFrame(adv.get("matriz_cenario_diaria", []))
         if not mtx_d.empty and "dia" in mtx_d.columns:
             mtx_d["dia_dt"] = pd.to_datetime(mtx_d["dia"], errors="coerce")
@@ -1353,6 +1399,22 @@ def main():
             st.metric("ISR médio", f"{isr_show:.3f}" if isr_show is not None else "-")
         with c7:
             st.metric("Regime abundância", "Sim" if abund_show else "Não" if abund_show is not None else "-")
+
+        st.markdown("**Hidrologia média no período requisitado (a partir de EAR/ENA diários):**")
+        h1, h2 = st.columns(2)
+        with h1:
+            st.metric("EAR médio (SIN) período", f"{hydro_period.get('ear_media_periodo_sin'):.2f}" if hydro_period.get("ear_media_periodo_sin") is not None else "-")
+        with h2:
+            st.metric("ENA média (SIN) período", f"{hydro_period.get('ena_media_periodo_sin'):.2f}" if hydro_period.get("ena_media_periodo_sin") is not None else "-")
+
+        if hydro_period.get("ear_media_periodo_por_submercado") or hydro_period.get("ena_media_periodo_por_submercado"):
+            subs = sorted(set(list((hydro_period.get("ear_media_periodo_por_submercado") or {}).keys()) + list((hydro_period.get("ena_media_periodo_por_submercado") or {}).keys())))
+            df_h = pd.DataFrame({
+                "Submercado": subs,
+                "EAR médio período": [ (hydro_period.get("ear_media_periodo_por_submercado") or {}).get(s) for s in subs],
+                "ENA média período": [ (hydro_period.get("ena_media_periodo_por_submercado") or {}).get(s) for s in subs],
+            })
+            st.dataframe(df_h, width="stretch", hide_index=True)
 
         if not mtx_d.empty:
             st.markdown("**Matriz diária das métricas (c1..c7) no período selecionado:**")
