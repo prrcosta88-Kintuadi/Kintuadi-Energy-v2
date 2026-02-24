@@ -143,13 +143,24 @@ class KintuadiIntegratedCollectorV2:
             col_list = ", ".join([f'"{c}"' for c in col_names])
 
             if is_xlsx:
-                # XLSX já está registrado como df_src_tmp
+                # XLSX com schema variável: alinhar por nome de coluna para evitar BinderError.
+                src_info = con.execute("PRAGMA table_info('df_src_tmp')").fetchall()
+                src_cols = {c[1] for c in src_info}
+
+                select_expr = []
+                for col in col_names:
+                    if col in src_cols:
+                        select_expr.append(f'"{col}"')
+                    else:
+                        select_expr.append(f'NULL AS "{col}"')
+                select_cols = ", ".join(select_expr)
+
                 if month is not None:
                     con.execute(
                         f"""
                         INSERT INTO {table_name}
                         ({col_list}, ano, mes)
-                        SELECT {col_list}, ?, ?
+                        SELECT {select_cols}, ?, ?
                         FROM df_src_tmp
                         """,
                         [year, month],
@@ -159,7 +170,7 @@ class KintuadiIntegratedCollectorV2:
                         f"""
                         INSERT INTO {table_name}
                         ({col_list}, ano, mes)
-                        SELECT {col_list}, ?, NULL
+                        SELECT {select_cols}, ?, NULL
                         FROM df_src_tmp
                         """,
                         [year],

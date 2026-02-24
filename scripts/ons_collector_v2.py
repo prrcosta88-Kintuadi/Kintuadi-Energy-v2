@@ -86,7 +86,6 @@ class ONSCollectorV2:
     OPEN_DATASETS: List[Tuple[str, str]] = [
         ("Reservatorios", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/reservatorio/RESERVATORIOS.xlsx"),
         ("Capacidade_Instalada", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/capacidade-geracao/CAPACIDADE_GERACAO.xlsx"),
-        ("Despacho_GFOM_2021", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/hist_despacho_energia/info2021.xlsx"),
     ]
 
     def __init__(
@@ -206,6 +205,17 @@ class ONSCollectorV2:
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/geracao_usina_2_ho/"
                 f"GERACAO_USINA-2_{year}.xlsx"
+            ))
+
+        # ============================
+        # DESPACHO GFOM ANUAL (2013-2021)
+        # ============================
+        for year in range(2013, 2022):
+            dynamic.append((
+                f"Despacho_GFOM_{year}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/geracao_termica_despacho_2_ho/"
+                f"GERACAO_TERMICA_DESPACHO_{year}.xlsx"
             ))
 
         return dynamic
@@ -356,8 +366,27 @@ class ONSCollectorV2:
             response = requests.get(url, timeout=OPEN_DATA_TIMEOUT)
 
             if response.status_code == 404:
-                logger.info(f"{dataset_name} não disponível (404).")
-                return None, 0
+                alt_url = None
+                if url.lower().endswith('.xlsx'):
+                    alt_url = url[:-5] + '.csv'
+                elif url.lower().endswith('.csv'):
+                    alt_url = url[:-4] + '.xlsx'
+                if alt_url:
+                    try:
+                        alt_resp = requests.get(alt_url, timeout=OPEN_DATA_TIMEOUT)
+                        if alt_resp.status_code == 200:
+                            response = alt_resp
+                            url = alt_url
+                            logger.info(f"{dataset_name} fallback para {alt_url}")
+                        else:
+                            logger.info(f"{dataset_name} não disponível (404).")
+                            return None, 0
+                    except requests.RequestException:
+                        logger.info(f"{dataset_name} não disponível (404).")
+                        return None, 0
+                else:
+                    logger.info(f"{dataset_name} não disponível (404).")
+                    return None, 0
 
             if response.status_code == 403:
                 logger.warning(f"{dataset_name} acesso negado (403).")
@@ -375,7 +404,13 @@ class ONSCollectorV2:
         with open(file_path, "wb") as f:
             f.write(response.content)
 
-        rows = self._count_csv_rows(response.content) if ext == ".csv" else 0
+        final_ext = ".xlsx" if (url.lower().endswith(".xlsx")) else ".csv"
+        if final_ext != ext:
+            # ajusta nome salvo caso fallback troque extensão
+            file_path = os.path.join(path, f"{dataset_name}{final_ext}")
+            with open(file_path, "wb") as f:
+                f.write(response.content)
+        rows = self._count_csv_rows(response.content) if final_ext == ".csv" else 0
 
         return file_path, rows
 

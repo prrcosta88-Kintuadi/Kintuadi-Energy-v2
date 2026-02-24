@@ -906,64 +906,89 @@ def _load_geracao_tipos_horaria_duckdb() -> Dict[str, pd.Series]:
 
 
 def _load_renovavel_disponivel_restricao_horaria() -> pd.DataFrame:
-    cols = ["instante", "renov_disponivel", "cod_razaorestricao", "dsc_restricao", "curtailment_limitada"]
+    cols = [
+        "instante",
+        "renov_disponivel",
+        "solar_disponivel",
+        "eolica_disponivel",
+        "cod_razaorestricao_solar",
+        "dsc_restricao_solar",
+        "cod_razaorestricao_eolica",
+        "dsc_restricao_eolica",
+        "val_geracaolimitada_solar",
+        "val_geracaolimitada_eolica",
+    ]
     if duckdb is None:
         return pd.DataFrame(columns=cols)
+
     con = _duckdb_connect()
     if con is None:
         return pd.DataFrame(columns=cols)
-    try:
-        tables = []
-        if _duckdb_table_exists(con, "restricao_fotovoltaica"):
-            tables.append("restricao_fotovoltaica")
-        if _duckdb_table_exists(con, "restricao_eolica"):
-            tables.append("restricao_eolica")
-        if not tables:
-            return pd.DataFrame(columns=cols)
 
-        parts = []
-        for t in tables:
-            info = con.execute(f"PRAGMA table_info('{t}')").fetchall()
-            c = {str(i[1]).lower(): str(i[1]) for i in info}
-            if "din_instante" not in c:
-                continue
-            ref_col = c.get("val_geracaoreferencia")
-            lim_col = c.get("val_geracaolimitada")
-            cod_col = c.get("cod_razaorestricao")
-            dsc_col = c.get("dsc_restricao")
-            if not ref_col:
-                continue
-            parts.append(
-                f"SELECT {_duckdb_date_expr(c['din_instante'])} AS instante, "
-                f"{_duckdb_num_expr(ref_col)} AS renov_disponivel, "
-                f"{_duckdb_num_expr(lim_col) if lim_col else 'NULL'} AS curtailment_limitada, "
-                f"TRIM(CAST({cod_col} AS VARCHAR)) AS cod_razaorestricao, "
-                f"TRIM(CAST({dsc_col} AS VARCHAR)) AS dsc_restricao "
-                f"FROM {t}"
-            )
-        if not parts:
-            return pd.DataFrame(columns=cols)
-        q = " UNION ALL ".join(parts)
-        df = con.execute(q).fetchdf().dropna(subset=["instante", "renov_disponivel"])
+    def _load_one(table: str, prefix: str) -> pd.DataFrame:
+        if not _duckdb_table_exists(con, table):
+            return pd.DataFrame()
+        info = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+        c = {str(i[1]).lower(): str(i[1]) for i in info}
+        if "din_instante" not in c or "val_geracaoreferencia" not in c:
+            return pd.DataFrame()
+        lim_col = c.get("val_geracaolimitada")
+        cod_col = c.get("cod_razaorestricao")
+        dsc_col = c.get("dsc_restricao")
+        q = f"""
+            SELECT
+                {_duckdb_date_expr(c['din_instante'])} AS instante,
+                {_duckdb_num_expr(c['val_geracaoreferencia'])} AS disponivel,
+                {_duckdb_num_expr(lim_col) if lim_col else 'NULL'} AS limitada,
+                TRIM(CAST({cod_col} AS VARCHAR)) AS cod,
+                TRIM(CAST({dsc_col} AS VARCHAR)) AS dsc
+            FROM {table}
+            WHERE {_duckdb_date_expr(c['din_instante'])} IS NOT NULL
+        """
+        df = con.execute(q).fetchdf().dropna(subset=["instante", "disponivel"])
         if df.empty:
-            return pd.DataFrame(columns=cols)
+            return pd.DataFrame()
         df["instante"] = pd.to_datetime(df["instante"], errors="coerce")
         df = df.dropna(subset=["instante"]) 
-        # soma disponibilidade no instante
-        disp = df.groupby("instante", as_index=False)["renov_disponivel"].sum()
-        # motivo principal: maior curtailment_limitada no instante
-        if "curtailment_limitada" in df.columns:
-            dfr = df.copy()
-            dfr["curtailment_limitada"] = pd.to_numeric(dfr["curtailment_limitada"], errors="coerce").fillna(0)
-            dfr = dfr.sort_values(["instante", "curtailment_limitada"], ascending=[True, False])
-            top = dfr.drop_duplicates(subset=["instante"])[["instante", "cod_razaorestricao", "dsc_restricao", "curtailment_limitada"]]
-            out = disp.merge(top, on="instante", how="left")
+        agg = df.groupby("instante", as_index=False).agg({"disponivel": "sum", "limitada": "sum"})
+        top = (
+            df.assign(limitada=pd.to_numeric(df["limitada"], errors="coerce").fillna(0))
+            .sort_values(["instante", "limitada"], ascending=[True, False])
+            .drop_duplicates(subset=["instante"])[["instante", "cod", "dsc"]]
+        )
+        out = agg.merge(top, on="instante", how="left")
+        out = out.rename(columns={
+            "disponivel": f"{prefix}_disponivel",
+            "limitada": f"val_geracaolimitada_{prefix}",
+            "cod": f"cod_razaorestricao_{prefix}",
+            "dsc": f"dsc_restricao_{prefix}",
+        })
+        return out
+
+    try:
+        solar = _load_one("restricao_fotovoltaica", "solar")
+        eolica = _load_one("restricao_eolica", "eolica")
+        if solar.empty and eolica.empty:
+            return pd.DataFrame(columns=cols)
+        if solar.empty:
+            out = eolica.copy()
+        elif eolica.empty:
+            out = solar.copy()
         else:
-            out = disp
-            out["cod_razaorestricao"] = None
-            out["dsc_restricao"] = None
-            out["curtailment_limitada"] = None
-        return out.sort_values("instante")
+            out = solar.merge(eolica, on="instante", how="outer")
+
+        for c in ["solar_disponivel", "eolica_disponivel", "val_geracaolimitada_solar", "val_geracaolimitada_eolica"]:
+            if c not in out.columns:
+                out[c] = np.nan
+
+        out["renov_disponivel"] = out[["solar_disponivel", "eolica_disponivel"]].fillna(0).sum(axis=1)
+        for c in [
+            "cod_razaorestricao_solar", "dsc_restricao_solar",
+            "cod_razaorestricao_eolica", "dsc_restricao_eolica",
+        ]:
+            if c not in out.columns:
+                out[c] = None
+        return out[cols].sort_values("instante")
     except Exception:
         return pd.DataFrame(columns=cols)
     finally:
@@ -1217,8 +1242,12 @@ def _compute_advanced_cross_metrics(
 
     ear_media_mensal = None
     ena_media_mensal = None
+    ear_media_mensal_por_submercado = {}
+    ena_media_mensal_por_submercado = {}
     ear_media_diaria = None
     ena_media_diaria = None
+    ear_diaria_por_submercado = {}
+    ena_diaria_por_submercado = {}
     ear_low_thr = None
     ear_high_thr = None
     matriz_cenario_mensal: List[Dict[str, Any]] = []
@@ -1233,11 +1262,19 @@ def _compute_advanced_cross_metrics(
             pld_vs_ena_mensal_por_submercado[sm] = _safe_corr(pld_m_sm, ena_sm, min_points=3)
 
         if ear_by_sub:
+            ear_media_mensal_por_submercado = {
+                sm: {i.strftime("%Y-%m"): float(v) for i, v in ser.dropna().sort_index().items()}
+                for sm, ser in ear_by_sub.items()
+            }
             ear_media_mensal = {
                 i.strftime("%Y-%m"): float(v)
                 for i, v in pd.concat(ear_by_sub, axis=1).mean(axis=1, skipna=True).dropna().sort_index().items()
             }
         if ena_by_sub:
+            ena_media_mensal_por_submercado = {
+                sm: {i.strftime("%Y-%m"): float(v) for i, v in ser.dropna().sort_index().items()}
+                for sm, ser in ena_by_sub.items()
+            }
             ena_media_mensal = {
                 i.strftime("%Y-%m"): float(v)
                 for i, v in pd.concat(ena_by_sub, axis=1).mean(axis=1, skipna=True).dropna().sort_index().items()
@@ -1255,33 +1292,53 @@ def _compute_advanced_cross_metrics(
                 if _duckdb_table_exists(con, "ear_diario_subsistema"):
                     q_ear_d = f"""
                         SELECT DATE_TRUNC('day', {_duckdb_date_expr('ear_data')}) AS dia,
+                               UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS sub_raw,
                                SUM({_duckdb_num_expr('ear_verif_subsistema_mwmes')}) AS ear_val
                         FROM ear_diario_subsistema
-                        GROUP BY 1
+                        GROUP BY 1,2
                         HAVING dia IS NOT NULL AND ear_val IS NOT NULL
                         ORDER BY 1
                     """
                     dfe = con.execute(q_ear_d).fetchdf()
                     if not dfe.empty:
+                        dfe["submercado"] = dfe["sub_raw"].map(_normalize_submercado_name)
+                        dfe = dfe.dropna(subset=["submercado"])
+                        ear_diaria_por_submercado = {}
+                        for sm, grp in dfe.groupby("submercado"):
+                            ear_diaria_por_submercado[str(sm)] = {
+                                pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                                for i, v in zip(grp["dia"], grp["ear_val"])
+                            }
+                        dfe_sin = dfe.groupby("dia", as_index=False)["ear_val"].sum()
                         ear_media_diaria = {
                             pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
-                            for i, v in zip(dfe["dia"], dfe["ear_val"])
+                            for i, v in zip(dfe_sin["dia"], dfe_sin["ear_val"])
                         }
 
                 if _duckdb_table_exists(con, "ena_diario_subsistema"):
                     q_ena_d = f"""
                         SELECT DATE_TRUNC('day', {_duckdb_date_expr('ena_data')}) AS dia,
+                               UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS sub_raw,
                                SUM({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}) AS ena_val
                         FROM ena_diario_subsistema
-                        GROUP BY 1
+                        GROUP BY 1,2
                         HAVING dia IS NOT NULL AND ena_val IS NOT NULL
                         ORDER BY 1
                     """
                     dfn = con.execute(q_ena_d).fetchdf()
                     if not dfn.empty:
+                        dfn["submercado"] = dfn["sub_raw"].map(_normalize_submercado_name)
+                        dfn = dfn.dropna(subset=["submercado"])
+                        ena_diaria_por_submercado = {}
+                        for sm, grp in dfn.groupby("submercado"):
+                            ena_diaria_por_submercado[str(sm)] = {
+                                pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                                for i, v in zip(grp["dia"], grp["ena_val"])
+                            }
+                        dfn_sin = dfn.groupby("dia", as_index=False)["ena_val"].sum()
                         ena_media_diaria = {
                             pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
-                            for i, v in zip(dfn["dia"], dfn["ena_val"])
+                            for i, v in zip(dfn_sin["dia"], dfn_sin["ena_val"])
                         }
             except Exception:
                 pass
@@ -1307,6 +1364,8 @@ def _compute_advanced_cross_metrics(
 
         seen_months = set()
         for month in sorted([i for i in idx if not pd.isna(i)]):
+            if pd.Timestamp(month) < pd.Timestamp("2021-01-01"):
+                continue
             month_label = month.strftime("%Y-%m")
             if month_label in seen_months:
                 continue
@@ -1451,7 +1510,11 @@ def _compute_advanced_cross_metrics(
 
             total_ger = float(gfom_h["ger"].sum()) if "ger" in gfom_h else 0
             total_gfom = float(gfom_h["gfom"].sum()) if "gfom" in gfom_h else 0
-            if total_ger > 0:
+            if total_ger == 0:
+                gfom_pct = "não houve despacho de térmica"
+            elif total_gfom == 0:
+                gfom_pct = "não houve despacho de térmica fora de mérito"
+            else:
                 gfom_pct = float((total_gfom / total_ger) * 100)
 
             if not pld_series.empty:
@@ -1646,11 +1709,13 @@ def _compute_advanced_cross_metrics(
             gx = gfom_hx.copy()
             gx.index = pd.to_datetime(gx.index, errors="coerce")
             gx = gx[~gx.index.isna()].groupby(level=0).sum().sort_index()
-            pct = (gx.get("gfom", pd.Series(dtype=float)) / gx.get("ger", pd.Series(dtype=float)).replace(0, np.nan)) * 100
+            ger_s = gx.get("ger", pd.Series(dtype=float)).astype(float)
+            gf_s = gx.get("gfom", pd.Series(dtype=float)).astype(float)
+            pct = (gf_s / ger_s.replace(0, np.nan)) * 100
             pct = pct.replace([np.inf, -np.inf], np.nan)
             gfom_pct_hor = pct.astype(object)
-            if "gfom" in gx.columns:
-                gfom_pct_hor.loc[gx["gfom"].fillna(0) == 0] = "não houve térmica fora de mérito"
+            gfom_pct_hor.loc[ger_s.fillna(0) == 0] = "não houve despacho de térmica"
+            gfom_pct_hor.loc[(ger_s.fillna(0) > 0) & (gf_s.fillna(0) == 0)] = "não houve térmica fora de mérito"
 
         ear_d_series = pd.Series({pd.to_datetime(k): v for k, v in (ear_media_diaria or {}).items()}) if ear_media_diaria else pd.Series(dtype=float)
         ena_d_series = pd.Series({pd.to_datetime(k): v for k, v in (ena_media_diaria or {}).items()}) if ena_media_diaria else pd.Series(dtype=float)
@@ -1676,15 +1741,26 @@ def _compute_advanced_cross_metrics(
                 "gfom_pct": None if (not isinstance(gfom_pct_hor, pd.Series) or gfom_pct_hor.empty or pd.isna(gfom_pct_hor.get(t))) else gfom_pct_hor.get(t),
                 "ear": None if (ear_d_series.empty or pd.isna(ear_d_series.get(pd.Timestamp(t).floor("D")))) else float(ear_d_series.get(pd.Timestamp(t).floor("D"))),
                 "ena": None if (ena_d_series.empty or pd.isna(ena_d_series.get(pd.Timestamp(t).floor("D")))) else float(ena_d_series.get(pd.Timestamp(t).floor("D"))),
-                "cod_razaorestricao": None,
-                "dsc_restricao": None,
+                "cod_razaorestricao_solar": "sem restrição",
+                "dsc_restricao_solar": "sem restrição",
+                "cod_razaorestricao_eolica": "sem restrição",
+                "dsc_restricao_eolica": "sem restrição",
+                "val_geracaolimitada_solar": None,
+                "val_geracaolimitada_eolica": None,
             }
             if not restr_h_df.empty:
                 row = restr_h_df[restr_h_df["instante"] == t]
                 if not row.empty:
                     rr = row.iloc[0]
-                    rec["cod_razaorestricao"] = rr.get("cod_razaorestricao")
-                    rec["dsc_restricao"] = rr.get("dsc_restricao")
+                    rec["cod_razaorestricao_solar"] = rr.get("cod_razaorestricao_solar") or "sem restrição"
+                    rec["dsc_restricao_solar"] = rr.get("dsc_restricao_solar") or "sem restrição"
+                    rec["cod_razaorestricao_eolica"] = rr.get("cod_razaorestricao_eolica") or "sem restrição"
+                    rec["dsc_restricao_eolica"] = rr.get("dsc_restricao_eolica") or "sem restrição"
+                    rec["val_geracaolimitada_solar"] = None if pd.isna(rr.get("val_geracaolimitada_solar")) else float(rr.get("val_geracaolimitada_solar"))
+                    rec["val_geracaolimitada_eolica"] = None if pd.isna(rr.get("val_geracaolimitada_eolica")) else float(rr.get("val_geracaolimitada_eolica"))
+
+            if rec["ipr"] is None and rec["isr"] is None and rec["pld"] is None and rec["gfom_pct"] is None and rec["cod_razaorestricao_solar"] == "sem restrição" and rec["cod_razaorestricao_eolica"] == "sem restrição":
+                continue
             painel_horario_renovavel.append(rec)
     except Exception as e:
         step_errors["painel_horario_renovavel"] = str(e)
@@ -1698,6 +1774,12 @@ def _compute_advanced_cross_metrics(
         "ena_media": ena_media,
         "ear_media_mensal": ear_media_mensal,
         "ena_media_mensal": ena_media_mensal,
+        "ear_media_mensal_por_submercado": ear_media_mensal_por_submercado,
+        "ena_media_mensal_por_submercado": ena_media_mensal_por_submercado,
+        "ear_diaria_sin": ear_media_diaria,
+        "ena_diaria_sin": ena_media_diaria,
+        "ear_diaria_por_submercado": ear_diaria_por_submercado,
+        "ena_diaria_por_submercado": ena_diaria_por_submercado,
         "ear_media_diaria": ear_media_diaria,
         "ena_media_diaria": ena_media_diaria,
         "matriz_cenario_mensal": matriz_cenario_mensal,
@@ -1721,7 +1803,7 @@ def _compute_advanced_cross_metrics(
         "metodologia": {
             "gfom_vs_pld": "GFOM% horário = (val_verifgfom / val_verifgeracao)*100; correlação de Pearson com PLD horário após alinhamento temporal.",
             "margem_operativa_real": "margem = (capacidade_disponivel_real - carga)/carga; margem média mensal = média da margem horária no mês; margem p5 = percentil 5% da margem horária no mês.",
-            "curtailment": "elétrico quando intercâmbio saturado (>=95% do limite) com curtailment>0; estrutural quando IPR>1, EAR>60 e PLD baixo; caso contrário operacional.",
+            "curtailment": "usa val_geracaolimitada (TM) como limitação renovável; razões por fonte (solar/eólica) via cod_razaorestricao e dsc_restricao.",
             "ipr_isr": "IPR horário = geracao_renovavel_disponivel/carga; ISR horário = geracao_renovavel_disponivel/carga_liquida.",
             "regime_abundancia": "True quando dependência térmica <15%, EAR acima do quartil superior da série e PLD <= 1.15*piso regulatório.",
             "mudanca_regime_trimestral": "desalinhamento_estrutural: stress<0.8 e PLD no quantil alto; estresse_operacional: stress>1; senão equilíbrio.",
@@ -2201,7 +2283,7 @@ def calcular_indicadores_termicos_revisados(
 
 
 def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
-    """Retorna série semanal de CVU por dat_fimsemana (somatório semanal de val_cvu)."""
+    """Retorna série semanal média de CVU por dat_fimsemana."""
     con = _duckdb_connect()
     if con is not None:
         try:
@@ -2209,7 +2291,7 @@ def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
                 q = f"""
                     SELECT
                         {_duckdb_date_expr('dat_fimsemana')} AS dat_fimsemana,
-                        SUM({_duckdb_num_expr('val_cvu')}) AS val_cvu
+                        AVG({_duckdb_num_expr('val_cvu')}) AS val_cvu
                     FROM cvu_usina_termica
                     GROUP BY 1
                     HAVING dat_fimsemana IS NOT NULL AND val_cvu > 0
@@ -2252,7 +2334,7 @@ def _load_cvu_weekly_series(ons: Dict[str, Any]) -> pd.Series:
     all_df = pd.concat(frames, ignore_index=True)
     weekly = (
         all_df.groupby(["dat_iniciosemana", "dat_fimsemana"], as_index=False)["val_cvu"]
-        .sum()
+        .mean()
         .sort_values("dat_fimsemana")
     )
     if weekly.empty:
@@ -2270,7 +2352,7 @@ def _expand_cvu_weekly_to_daily(ons: Dict[str, Any]) -> pd.Series:
                     SELECT
                         {_duckdb_date_expr('dat_iniciosemana')} AS dat_iniciosemana,
                         {_duckdb_date_expr('dat_fimsemana')} AS dat_fimsemana,
-                        SUM({_duckdb_num_expr('val_cvu')}) AS val_cvu
+                        AVG({_duckdb_num_expr('val_cvu')}) AS val_cvu
                     FROM cvu_usina_termica
                     GROUP BY 1,2
                     HAVING dat_iniciosemana IS NOT NULL AND dat_fimsemana IS NOT NULL AND val_cvu > 0
@@ -2320,7 +2402,7 @@ def _expand_cvu_weekly_to_daily(ons: Dict[str, Any]) -> pd.Series:
     wk = (
         pd.concat(frames, ignore_index=True)
         .groupby(["dat_iniciosemana", "dat_fimsemana"], as_index=False)["val_cvu"]
-        .sum()
+        .mean()
     )
     daily_vals: Dict[pd.Timestamp, float] = {}
     for _, r in wk.iterrows():
