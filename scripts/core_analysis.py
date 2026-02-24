@@ -436,12 +436,12 @@ def _compute_curtailment_from_csv(
             # Curto-circuito: layout novo (tm) prioriza val_geracaolimitada como curtailment
             if has_limitada:
                 curta_expr = _duckdb_num_expr(cols["val_geracaolimitada"])
-                if has_disp:
-                    disp_expr = _duckdb_num_expr(cols["val_disponibilidade"])
+                if has_ref:
+                    disp_expr = _duckdb_num_expr(cols["val_geracaoreferencia"])
                 elif has_ref_final:
                     disp_expr = _duckdb_num_expr(cols["val_geracaoreferenciafinal"])
-                elif has_ref:
-                    disp_expr = _duckdb_num_expr(cols["val_geracaoreferencia"])
+                elif has_disp:
+                    disp_expr = _duckdb_num_expr(cols["val_disponibilidade"])
                 elif has_geracao:
                     disp_expr = f"COALESCE({_duckdb_num_expr(cols['val_geracao'])},0) + COALESCE({_duckdb_num_expr(cols['val_geracaolimitada'])},0)"
                 else:

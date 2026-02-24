@@ -226,6 +226,7 @@ class ONSCollectorV2:
         dynamic = []
 
         months = self._generate_month_range("2021-10")
+        months_disponibilidade = self._generate_month_range("2015-01")
 
         for m in months:
             year, month = m.split("-")
@@ -236,14 +237,6 @@ class ONSCollectorV2:
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/geracao_termica_despacho_2_ho/"
                 f"GERACAO_TERMICA_DESPACHO-2_{year}_{month}.xlsx"
-            ))
-
-            # Disponibilidade
-            dynamic.append((
-                f"Disponibilidade_Usina_{m}",
-                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
-                f"dataset/disponibilidade_usina_ho/"
-                f"DISPONIBILIDADE_USINA_{year}_{month}.xlsx"
             ))
 
             # Restrição FV (disponível desde 2024-04)
@@ -261,6 +254,16 @@ class ONSCollectorV2:
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/restricao_coff_eolica_tm/"
                 f"RESTRICAO_COFF_EOLICA_{year}_{month}.xlsx"
+            ))
+
+        # Disponibilidade (histórico desde 2015-01)
+        for m in months_disponibilidade:
+            year, month = m.split("-")
+            dynamic.append((
+                f"Disponibilidade_Usina_{m}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/disponibilidade_usina_ho/"
+                f"DISPONIBILIDADE_USINA_{year}_{month}.xlsx"
             ))
 
         # Geração por usina (mensal: 2022-01 → atual)

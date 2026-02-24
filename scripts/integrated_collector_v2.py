@@ -145,12 +145,13 @@ class KintuadiIntegratedCollectorV2:
             if is_xlsx:
                 # XLSX com schema variável: alinhar por nome de coluna para evitar BinderError.
                 src_info = con.execute("PRAGMA table_info('df_src_tmp')").fetchall()
-                src_cols = {c[1] for c in src_info}
+                src_cols_map = {str(c[1]).strip().lower(): str(c[1]) for c in src_info}
 
                 select_expr = []
                 for col in col_names:
-                    if col in src_cols:
-                        select_expr.append(f'"{col}"')
+                    src_col = src_cols_map.get(str(col).strip().lower())
+                    if src_col:
+                        select_expr.append(f'"{src_col}"')
                     else:
                         select_expr.append(f'NULL AS "{col}"')
                 select_cols = ", ".join(select_expr)
@@ -187,12 +188,13 @@ class KintuadiIntegratedCollectorV2:
                 )
 
                 src_info = con.execute("PRAGMA table_info('_src_csv_tmp')").fetchall()
-                src_cols = {c[1] for c in src_info}
+                src_cols_map = {str(c[1]).strip().lower(): str(c[1]) for c in src_info}
 
                 select_expr = []
                 for col in col_names:
-                    if col in src_cols:
-                        select_expr.append(f'"{col}"')
+                    src_col = src_cols_map.get(str(col).strip().lower())
+                    if src_col:
+                        select_expr.append(f'"{src_col}"')
                     else:
                         select_expr.append(f'NULL AS "{col}"')
 

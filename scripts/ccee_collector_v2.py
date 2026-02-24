@@ -212,7 +212,11 @@ class CCEEPLDCollector:
                 continue
             datasets.append({"year": year, "file": f})
 
-        if datasets:
+        # Sempre tenta atualizar janela recente para evitar defasagem do ano corrente
+        # (ex.: arquivo local parou em uma data anterior, mas API já possui novos dias).
+        pld_data = self.collect_pld_data(days=120)
+        records = pld_data.get("data", []) if isinstance(pld_data, dict) else []
+        if not records and datasets:
             return {
                 "metadata": {
                     "source": "CCEE_PLD",
@@ -223,9 +227,6 @@ class CCEEPLDCollector:
                 "datasets": datasets,
             }
 
-        # fallback API
-        pld_data = self.collect_pld_data(days=90)
-        records = pld_data.get("data", []) if isinstance(pld_data, dict) else []
         if not records:
             return {
                 "metadata": {
@@ -245,18 +246,31 @@ class CCEEPLDCollector:
         else:
             df["year"] = datetime.now().strftime("%Y")
 
-        datasets = []
+        # mescla local + API, priorizando API para o ano corrente
+        datasets_by_year: Dict[int, Dict[str, Any]] = {}
+        for ds in datasets:
+            try:
+                datasets_by_year[int(ds.get("year"))] = ds
+            except Exception:
+                continue
+
         for y, g in df.groupby("year"):
-            datasets.append({"year": int(y), "records": g.to_dict(orient="records")})
+            try:
+                yi = int(y)
+            except Exception:
+                continue
+            datasets_by_year[yi] = {"year": yi, "records": g.to_dict(orient="records")}
+
+        merged_datasets = [datasets_by_year[k] for k in sorted(datasets_by_year.keys())]
 
         return {
             "metadata": {
                 "source": "CCEE_PLD",
                 "status": "success",
-                "datasets_collected": len(datasets),
+                "datasets_collected": len(merged_datasets),
                 "collection_time": datetime.now().isoformat(),
             },
-            "datasets": datasets,
+            "datasets": merged_datasets,
         }
 
     def collect_open_data_csv(self, limit: int = 500) -> Dict[str, Dict[str, Any]]:
