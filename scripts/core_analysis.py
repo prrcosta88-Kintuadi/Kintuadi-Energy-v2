@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
 import re
+import unicodedata
 
 import pandas as pd
 import numpy as np
@@ -77,7 +78,11 @@ def _duckdb_date_expr(col: str) -> str:
         f"TRY_CAST({col} AS TIMESTAMP), "
         f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d/%m/%Y %H:%M:%S'), "
         f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d/%m/%Y %H:%M'), "
-        f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d/%m/%Y')"
+        f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d/%m/%Y'), "
+        f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d-%m-%Y %H:%M:%S'), "
+        f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d-%m-%y %H:%M:%S'), "
+        f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d-%m-%Y'), "
+        f"TRY_STRPTIME(CAST({col} AS VARCHAR), '%d-%m-%y')"
         f")"
     )
 
@@ -685,6 +690,14 @@ def _normalize_submercado_name(value: Any) -> Optional[str]:
     return mapping.get(v)
 
 
+
+
+def _normalize_text_key(value: Any) -> str:
+    txt = str(value or "").strip().lower()
+    txt = unicodedata.normalize("NFKD", txt).encode("ascii", "ignore").decode("ascii")
+    return txt
+
+
 def _load_gfom_hourly(ons: Dict[str, Any]) -> pd.DataFrame:
     if duckdb is None:
         return pd.DataFrame(columns=["ger", "gfom"])
@@ -825,6 +838,138 @@ def _load_disponibilidade_horaria(ons: Dict[str, Any]) -> pd.Series:
         con.close()
 
 
+def _load_carga_sin_horaria_duckdb() -> pd.Series:
+    if duckdb is None:
+        return pd.Series(dtype=float)
+    con = _duckdb_connect()
+    if con is None or not _duckdb_table_exists(con, "curva_carga"):
+        if con is not None:
+            con.close()
+        return pd.Series(dtype=float)
+    try:
+        q = f"""
+            SELECT
+                {_duckdb_date_expr('din_instante')} AS din_instante,
+                UPPER(TRIM(CAST(id_subsistema AS VARCHAR))) AS id_subsistema,
+                {_duckdb_num_expr('val_cargaenergiahomwmed')} AS carga
+            FROM curva_carga
+            WHERE {_duckdb_date_expr('din_instante')} IS NOT NULL
+        """
+        df = con.execute(q).fetchdf().dropna(subset=["din_instante", "id_subsistema", "carga"])
+        if df.empty:
+            return pd.Series(dtype=float)
+        df = df[df["id_subsistema"].isin(["N", "NE", "SE", "S"]) ]
+        s = df.groupby("din_instante")["carga"].sum().sort_index()
+        return _ensure_tz_naive_index(s.astype(float))
+    except Exception:
+        return pd.Series(dtype=float)
+    finally:
+        con.close()
+
+
+def _load_geracao_tipos_horaria_duckdb() -> Dict[str, pd.Series]:
+    out = {"solar": pd.Series(dtype=float), "eolica": pd.Series(dtype=float), "termica": pd.Series(dtype=float)}
+    if duckdb is None:
+        return out
+    con = _duckdb_connect()
+    if con is None or not _duckdb_table_exists(con, "geracao_usina_horaria"):
+        if con is not None:
+            con.close()
+        return out
+    try:
+        q = f"""
+            SELECT
+                {_duckdb_date_expr('din_instante')} AS din_instante,
+                UPPER(TRIM(CAST(nom_tipousina AS VARCHAR))) AS tipousina,
+                {_duckdb_num_expr('val_geracao')} AS val_geracao
+            FROM geracao_usina_horaria
+            WHERE {_duckdb_date_expr('din_instante')} IS NOT NULL
+        """
+        df = con.execute(q).fetchdf().dropna(subset=["din_instante", "tipousina", "val_geracao"])
+        if df.empty:
+            return out
+        df["k"] = df["tipousina"].apply(_normalize_text_key)
+        solar = df[df["k"].str.contains("fotov|solar", regex=True)]
+        eolica = df[df["k"].str.contains("eol", regex=True)]
+        termica = df[df["k"].str.contains("term", regex=True)]
+        if not solar.empty:
+            out["solar"] = _ensure_tz_naive_index(solar.groupby("din_instante")["val_geracao"].sum().sort_index().astype(float))
+        if not eolica.empty:
+            out["eolica"] = _ensure_tz_naive_index(eolica.groupby("din_instante")["val_geracao"].sum().sort_index().astype(float))
+        if not termica.empty:
+            out["termica"] = _ensure_tz_naive_index(termica.groupby("din_instante")["val_geracao"].sum().sort_index().astype(float))
+        return out
+    except Exception:
+        return out
+    finally:
+        con.close()
+
+
+def _load_renovavel_disponivel_restricao_horaria() -> pd.DataFrame:
+    cols = ["instante", "renov_disponivel", "cod_razaorestricao", "dsc_restricao", "curtailment_limitada"]
+    if duckdb is None:
+        return pd.DataFrame(columns=cols)
+    con = _duckdb_connect()
+    if con is None:
+        return pd.DataFrame(columns=cols)
+    try:
+        tables = []
+        if _duckdb_table_exists(con, "restricao_fotovoltaica"):
+            tables.append("restricao_fotovoltaica")
+        if _duckdb_table_exists(con, "restricao_eolica"):
+            tables.append("restricao_eolica")
+        if not tables:
+            return pd.DataFrame(columns=cols)
+
+        parts = []
+        for t in tables:
+            info = con.execute(f"PRAGMA table_info('{t}')").fetchall()
+            c = {str(i[1]).lower(): str(i[1]) for i in info}
+            if "din_instante" not in c:
+                continue
+            ref_col = c.get("val_geracaoreferencia")
+            lim_col = c.get("val_geracaolimitada")
+            cod_col = c.get("cod_razaorestricao")
+            dsc_col = c.get("dsc_restricao")
+            if not ref_col:
+                continue
+            parts.append(
+                f"SELECT {_duckdb_date_expr(c['din_instante'])} AS instante, "
+                f"{_duckdb_num_expr(ref_col)} AS renov_disponivel, "
+                f"{_duckdb_num_expr(lim_col) if lim_col else 'NULL'} AS curtailment_limitada, "
+                f"TRIM(CAST({cod_col} AS VARCHAR)) AS cod_razaorestricao, "
+                f"TRIM(CAST({dsc_col} AS VARCHAR)) AS dsc_restricao "
+                f"FROM {t}"
+            )
+        if not parts:
+            return pd.DataFrame(columns=cols)
+        q = " UNION ALL ".join(parts)
+        df = con.execute(q).fetchdf().dropna(subset=["instante", "renov_disponivel"])
+        if df.empty:
+            return pd.DataFrame(columns=cols)
+        df["instante"] = pd.to_datetime(df["instante"], errors="coerce")
+        df = df.dropna(subset=["instante"]) 
+        # soma disponibilidade no instante
+        disp = df.groupby("instante", as_index=False)["renov_disponivel"].sum()
+        # motivo principal: maior curtailment_limitada no instante
+        if "curtailment_limitada" in df.columns:
+            dfr = df.copy()
+            dfr["curtailment_limitada"] = pd.to_numeric(dfr["curtailment_limitada"], errors="coerce").fillna(0)
+            dfr = dfr.sort_values(["instante", "curtailment_limitada"], ascending=[True, False])
+            top = dfr.drop_duplicates(subset=["instante"])[["instante", "cod_razaorestricao", "dsc_restricao", "curtailment_limitada"]]
+            out = disp.merge(top, on="instante", how="left")
+        else:
+            out = disp
+            out["cod_razaorestricao"] = None
+            out["dsc_restricao"] = None
+            out["curtailment_limitada"] = None
+        return out.sort_values("instante")
+    except Exception:
+        return pd.DataFrame(columns=cols)
+    finally:
+        con.close()
+
+
 def _load_ear_ena_monthly_by_submercado(ons: Dict[str, Any]) -> Tuple[Dict[str, pd.Series], Dict[str, pd.Series]]:
     """Consolida EAR e ENA mensais por submercado apenas via DuckDB."""
     ear_by_sub: Dict[str, pd.Series] = {}
@@ -840,7 +985,7 @@ def _load_ear_ena_monthly_by_submercado(ons: Dict[str, Any]) -> Tuple[Dict[str, 
                 SELECT
                     DATE_TRUNC('month', {_duckdb_date_expr('ear_data')}) AS mes,
                     UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS submercado_raw,
-                    AVG({_duckdb_num_expr('ear_verif_subsistema_mwmes')}) AS valor
+                    SUM({_duckdb_num_expr('ear_verif_subsistema_mwmes')}) / NULLIF(COUNT(DISTINCT DATE_TRUNC('day', {_duckdb_date_expr('ear_data')})), 0) AS valor
                 FROM ear_diario_subsistema
                 GROUP BY 1,2
                 HAVING mes IS NOT NULL AND valor IS NOT NULL
@@ -858,7 +1003,7 @@ def _load_ear_ena_monthly_by_submercado(ons: Dict[str, Any]) -> Tuple[Dict[str, 
                 SELECT
                     DATE_TRUNC('month', {_duckdb_date_expr('ena_data')}) AS mes,
                     UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS submercado_raw,
-                    AVG({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}) AS valor
+                    SUM({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}) / NULLIF(COUNT(DISTINCT DATE_TRUNC('day', {_duckdb_date_expr('ena_data')})), 0) AS valor
                 FROM ena_diario_subsistema
                 GROUP BY 1,2
                 HAVING mes IS NOT NULL AND valor IS NOT NULL
@@ -937,14 +1082,25 @@ def _compute_advanced_cross_metrics(
     step_errors: Dict[str, str] = {}
 
     carga_sin = _ensure_tz_naive_index(_to_series(load.get("sin", {}).get("serie", []), "carga"))
+    carga_sin_db = _load_carga_sin_horaria_duckdb()
+    if not carga_sin_db.empty:
+        carga_sin = carga_sin_db
 
-    solar_key = next((k for k in generation.keys() if "solar" in k.lower()), None)
-    eolica_key = next((k for k in generation.keys() if "eolica" in k.lower()), None)
-    termica_key = next((k for k in generation.keys() if "termica" in k.lower()), None)
+    solar_key = next((k for k in generation.keys() if any(t in _normalize_text_key(k) for t in ["solar", "fotov"])) , None)
+    eolica_key = next((k for k in generation.keys() if any(t in _normalize_text_key(k) for t in ["eolica", "eolie", "eoli"])) , None)
+    termica_key = next((k for k in generation.keys() if "termica" in _normalize_text_key(k)), None)
 
     solar = _ensure_tz_naive_index(_to_series(generation.get(solar_key, {}).get("serie", []), "geracao")) if solar_key else pd.Series(dtype=float)
     eolica = _ensure_tz_naive_index(_to_series(generation.get(eolica_key, {}).get("serie", []), "geracao")) if eolica_key else pd.Series(dtype=float)
     termica = _ensure_tz_naive_index(_to_series(generation.get(termica_key, {}).get("serie", []), "geracao")) if termica_key else pd.Series(dtype=float)
+
+    tipos_db = _load_geracao_tipos_horaria_duckdb()
+    if not tipos_db.get("solar", pd.Series(dtype=float)).empty:
+        solar = _ensure_tz_naive_index(tipos_db["solar"])
+    if not tipos_db.get("eolica", pd.Series(dtype=float)).empty:
+        eolica = _ensure_tz_naive_index(tipos_db["eolica"])
+    if not tipos_db.get("termica", pd.Series(dtype=float)).empty:
+        termica = _ensure_tz_naive_index(tipos_db["termica"])
 
     total_key = "sin" if "sin" in generation else None
     geracao_total = _ensure_tz_naive_index(_to_series(generation.get(total_key, {}).get("serie", []), "geracao")) if total_key else pd.Series(dtype=float)
@@ -971,15 +1127,27 @@ def _compute_advanced_cross_metrics(
     # IPR e ISR (horário)
     ipr_medio = None
     isr_medio = None
-    if not carga_sin.empty:
-        renov = solar.add(eolica, fill_value=0)
-        df_ipr = pd.DataFrame({"renov": renov, "carga": carga_sin}).dropna()
+    ipr_horario = pd.Series(dtype=float)
+    isr_horario = pd.Series(dtype=float)
+
+    restr_h = _load_renovavel_disponivel_restricao_horaria()
+    renov_disponivel_h = pd.Series(dtype=float)
+    if not restr_h.empty:
+        renov_disponivel_h = _ensure_tz_naive_index(pd.Series(restr_h["renov_disponivel"].values, index=pd.to_datetime(restr_h["instante"])))
+
+    if not carga_sin.empty and not renov_disponivel_h.empty:
+        df_ipr = pd.DataFrame({"renov_disp": renov_disponivel_h, "carga": carga_sin}).dropna()
         df_ipr = df_ipr[df_ipr["carga"] > 0]
         if not df_ipr.empty:
-            ipr_medio = float((df_ipr["renov"] / df_ipr["carga"]).mean())
-    if not carga_liquida.empty:
-        isr_val = _compute_isr(solar, eolica, carga_liquida)
-        isr_medio = float(isr_val) if isr_val is not None else None
+            ipr_horario = _ensure_tz_naive_index(df_ipr["renov_disp"] / df_ipr["carga"])
+            ipr_medio = float(ipr_horario.iloc[-1]) if not ipr_horario.empty else None
+
+    if not carga_liquida.empty and not renov_disponivel_h.empty:
+        df_isr = pd.DataFrame({"renov_disp": renov_disponivel_h, "carga_liquida": carga_liquida}).dropna()
+        df_isr = df_isr[df_isr["carga_liquida"] > 0]
+        if not df_isr.empty:
+            isr_horario = _ensure_tz_naive_index(df_isr["renov_disp"] / df_isr["carga_liquida"])
+            isr_medio = float(isr_horario.iloc[-1]) if not isr_horario.empty else None
 
     dependencia_termica_pct = None
     if not termica.empty and not geracao_total.empty:
@@ -1087,7 +1255,7 @@ def _compute_advanced_cross_metrics(
                 if _duckdb_table_exists(con, "ear_diario_subsistema"):
                     q_ear_d = f"""
                         SELECT DATE_TRUNC('day', {_duckdb_date_expr('ear_data')}) AS dia,
-                               AVG({_duckdb_num_expr('ear_verif_subsistema_mwmes')}) AS ear_val
+                               SUM({_duckdb_num_expr('ear_verif_subsistema_mwmes')}) AS ear_val
                         FROM ear_diario_subsistema
                         GROUP BY 1
                         HAVING dia IS NOT NULL AND ear_val IS NOT NULL
@@ -1103,7 +1271,7 @@ def _compute_advanced_cross_metrics(
                 if _duckdb_table_exists(con, "ena_diario_subsistema"):
                     q_ena_d = f"""
                         SELECT DATE_TRUNC('day', {_duckdb_date_expr('ena_data')}) AS dia,
-                               AVG({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}) AS ena_val
+                               SUM({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}) AS ena_val
                         FROM ena_diario_subsistema
                         GROUP BY 1
                         HAVING dia IS NOT NULL AND ena_val IS NOT NULL
@@ -1265,7 +1433,7 @@ def _compute_advanced_cross_metrics(
     if (
         dependencia_termica_pct is not None and ear_medio is not None and pld_medio is not None
     ):
-        regime_abundancia = bool(dependencia_termica_pct < 15 and ear_medio > 70 and pld_medio <= PLD_PISO * 1.15)
+        regime_abundancia = bool(dependencia_termica_pct < 15 and (ear_high_thr is not None and ear_medio > ear_high_thr) and pld_medio <= PLD_PISO * 1.15)
 
     # GFOM x PLD
     gfom_h = _load_gfom_hourly(ons)
@@ -1377,19 +1545,8 @@ def _compute_advanced_cross_metrics(
             if not df_capd.empty:
                 stress_d = (df_capd["carga"] / df_capd["cap"]).groupby(df_capd.index.floor("D")).mean()
 
-        ipr_d = pd.Series(dtype=float)
-        if not carga_sin.empty:
-            renov_dfr = pd.DataFrame({"renov": solar.add(eolica, fill_value=0), "carga": carga_sin}).dropna()
-            renov_dfr = renov_dfr[renov_dfr["carga"] > 0]
-            if not renov_dfr.empty:
-                ipr_d = (renov_dfr["renov"] / renov_dfr["carga"]).groupby(renov_dfr.index.floor("D")).mean()
-
-        isr_d = pd.Series(dtype=float)
-        if not carga_liquida.empty:
-            df_isrd = pd.DataFrame({"renov": solar.add(eolica, fill_value=0), "carga_liquida": carga_liquida}).dropna()
-            df_isrd = df_isrd[df_isrd["carga_liquida"] > 0]
-            if not df_isrd.empty:
-                isr_d = (df_isrd["renov"] / df_isrd["carga_liquida"]).groupby(df_isrd.index.floor("D")).mean()
+        ipr_d = ipr_horario.groupby(ipr_horario.index.floor("D")).mean() if not ipr_horario.empty else pd.Series(dtype=float)
+        isr_d = isr_horario.groupby(isr_horario.index.floor("D")).mean() if not isr_horario.empty else pd.Series(dtype=float)
 
         term_dep_d = pd.Series(dtype=float)
         if not termica.empty and not geracao_total.empty:
@@ -1480,6 +1637,58 @@ def _compute_advanced_cross_metrics(
     except Exception as e:
         step_errors["mudanca_regime_historica_trimestral"] = str(e)
 
+    painel_horario_renovavel = []
+    try:
+        pld_h = _ensure_tz_naive_index(pld_series)
+        gfom_hx = _load_gfom_hourly(ons)
+        gfom_pct_hor = pd.Series(dtype=object)
+        if not gfom_hx.empty:
+            gx = gfom_hx.copy()
+            gx.index = pd.to_datetime(gx.index, errors="coerce")
+            gx = gx[~gx.index.isna()].groupby(level=0).sum().sort_index()
+            pct = (gx.get("gfom", pd.Series(dtype=float)) / gx.get("ger", pd.Series(dtype=float)).replace(0, np.nan)) * 100
+            pct = pct.replace([np.inf, -np.inf], np.nan)
+            gfom_pct_hor = pct.astype(object)
+            if "gfom" in gx.columns:
+                gfom_pct_hor.loc[gx["gfom"].fillna(0) == 0] = "não houve térmica fora de mérito"
+
+        ear_d_series = pd.Series({pd.to_datetime(k): v for k, v in (ear_media_diaria or {}).items()}) if ear_media_diaria else pd.Series(dtype=float)
+        ena_d_series = pd.Series({pd.to_datetime(k): v for k, v in (ena_media_diaria or {}).items()}) if ena_media_diaria else pd.Series(dtype=float)
+
+        restr_h_df = restr_h.copy() if isinstance(restr_h, pd.DataFrame) else pd.DataFrame()
+        if not restr_h_df.empty:
+            restr_h_df["instante"] = pd.to_datetime(restr_h_df["instante"], errors="coerce")
+            restr_h_df = restr_h_df.dropna(subset=["instante"]).sort_values("instante")
+
+        idxh = pd.DatetimeIndex([])
+        for ser in [ipr_horario, isr_horario, pld_h, gfom_pct_hor if isinstance(gfom_pct_hor, pd.Series) else pd.Series(dtype=float), carga_liquida]:
+            if isinstance(ser, pd.Series) and not ser.empty:
+                idxh = idxh.union(pd.DatetimeIndex(ser.index))
+        if not restr_h_df.empty:
+            idxh = idxh.union(pd.DatetimeIndex(restr_h_df["instante"]))
+
+        for t in sorted(idxh):
+            rec = {
+                "instante": pd.Timestamp(t).strftime("%Y-%m-%d %H:%M:%S"),
+                "ipr": None if (ipr_horario.empty or pd.isna(ipr_horario.get(t))) else float(ipr_horario.get(t)),
+                "isr": None if (isr_horario.empty or pd.isna(isr_horario.get(t))) else float(isr_horario.get(t)),
+                "pld": None if (pld_h.empty or pd.isna(pld_h.get(t))) else float(pld_h.get(t)),
+                "gfom_pct": None if (not isinstance(gfom_pct_hor, pd.Series) or gfom_pct_hor.empty or pd.isna(gfom_pct_hor.get(t))) else gfom_pct_hor.get(t),
+                "ear": None if (ear_d_series.empty or pd.isna(ear_d_series.get(pd.Timestamp(t).floor("D")))) else float(ear_d_series.get(pd.Timestamp(t).floor("D"))),
+                "ena": None if (ena_d_series.empty or pd.isna(ena_d_series.get(pd.Timestamp(t).floor("D")))) else float(ena_d_series.get(pd.Timestamp(t).floor("D"))),
+                "cod_razaorestricao": None,
+                "dsc_restricao": None,
+            }
+            if not restr_h_df.empty:
+                row = restr_h_df[restr_h_df["instante"] == t]
+                if not row.empty:
+                    rr = row.iloc[0]
+                    rec["cod_razaorestricao"] = rr.get("cod_razaorestricao")
+                    rec["dsc_restricao"] = rr.get("dsc_restricao")
+            painel_horario_renovavel.append(rec)
+    except Exception as e:
+        step_errors["painel_horario_renovavel"] = str(e)
+
     return {
         "status": "parcial" if step_errors else "disponível",
         "diagnostico_etapas": step_errors,
@@ -1513,8 +1722,8 @@ def _compute_advanced_cross_metrics(
             "gfom_vs_pld": "GFOM% horário = (val_verifgfom / val_verifgeracao)*100; correlação de Pearson com PLD horário após alinhamento temporal.",
             "margem_operativa_real": "margem = (capacidade_disponivel_real - carga)/carga; margem média mensal = média da margem horária no mês; margem p5 = percentil 5% da margem horária no mês.",
             "curtailment": "elétrico quando intercâmbio saturado (>=95% do limite) com curtailment>0; estrutural quando IPR>1, EAR>60 e PLD baixo; caso contrário operacional.",
-            "ipr_isr": "IPR = média((solar+eólica)/carga); ISR = média((solar+eólica)/carga_liquida).",
-            "regime_abundancia": "True quando dependência térmica <15%, EAR>70 e PLD <= 1.15*piso regulatório.",
+            "ipr_isr": "IPR horário = geracao_renovavel_disponivel/carga; ISR horário = geracao_renovavel_disponivel/carga_liquida.",
+            "regime_abundancia": "True quando dependência térmica <15%, EAR acima do quartil superior da série e PLD <= 1.15*piso regulatório.",
             "mudanca_regime_trimestral": "desalinhamento_estrutural: stress<0.8 e PLD no quantil alto; estresse_operacional: stress>1; senão equilíbrio.",
         },
         "volatilidade_intradiaria": {
@@ -1546,9 +1755,12 @@ def _compute_advanced_cross_metrics(
             "tendencia_estrutural_mensal": tendencia_estrutural_mensal,
         },
         "indices_renovaveis": {
-            "ipr_medio": ipr_medio,
-            "isr_medio": isr_medio,
+            "ipr_horario": {i.strftime("%Y-%m-%d %H:%M:%S"): float(v) for i, v in ipr_horario.dropna().items()} if not ipr_horario.empty else {},
+            "isr_horario": {i.strftime("%Y-%m-%d %H:%M:%S"): float(v) for i, v in isr_horario.dropna().items()} if not isr_horario.empty else {},
+            "ipr_ultimo": ipr_medio,
+            "isr_ultimo": isr_medio,
         },
+        "painel_horario_renovavel": painel_horario_renovavel,
         "mudanca_regime_historica_trimestral": mudanca_regime_trimestral,
     }
 
