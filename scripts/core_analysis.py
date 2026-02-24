@@ -1867,107 +1867,6 @@ def _classificar_curtailment(
 
 
 # =====================================================================
-# CCEE — Térmica / MCP
-# =====================================================================
-
-def compute_mcp_economico(
-    pld_series: pd.Series,
-    carga_series: pd.Series,
-    geracao_hidraulica: pd.Series,
-    cvu_medio: Optional[float]
-) -> Dict[str, Any]:
-
-    pld_series = _ensure_tz_naive_index(pld_series)
-    carga_series = _ensure_tz_naive_index(carga_series)
-    geracao_hidraulica = _ensure_tz_naive_index(geracao_hidraulica)
-
-    if pld_series.empty or carga_series.empty:
-        return {"status": "indisponível"}
-
-    if geracao_hidraulica.empty or geracao_hidraulica.mean() <= 0:
-        return {"status": "indisponível"}
-
-
-    # Calcular correlações com tratamento de dados ausentes
-    corr_pld_carga = None
-    corr_pld_hidro = None
-    
-    try:
-        # Alinhar séries temporais
-        df_correl = pd.DataFrame({
-            'pld': pld_series,
-            'carga': carga_series.reindex(pld_series.index).ffill().bfill(),
-            'hidro': geracao_hidraulica.reindex(pld_series.index).ffill().bfill()
-        }).dropna()
-        
-        if len(df_correl) > 2:  # Mínimo de pontos para correlação
-            corr_pld_carga = float(df_correl['pld'].corr(df_correl['carga']))
-            corr_pld_hidro = float(df_correl['pld'].corr(df_correl['hidro']))
-    except Exception:
-        pass
-
-    # Determinar regime baseado no stress index
-    stress_index = None
-
-    if (
-        not geracao_hidraulica.empty and
-        geracao_hidraulica.mean() > 0 and
-        not carga_series.empty
-    ):
-        stress_index = carga_series.mean() / geracao_hidraulica.mean()
-
-    if stress_index is None:
-        regime = "indeterminado"
-    elif stress_index > 1.1:
-        regime = "escassez estrutural"
-    elif stress_index > 0.95:
-        regime = "equilíbrio"
-    else:
-        regime = "excedente estrutural"
-
-
-    # Determinar formação de preço
-    if corr_pld_hidro is not None and abs(corr_pld_hidro) > 0.6:
-        formacao_preco = "estrutural"
-    elif corr_pld_hidro is not None and abs(corr_pld_hidro) > 0.3:
-        formacao_preco = "mista"
-    else:
-        formacao_preco = "conjuntural"
-
-    # Determinar posição térmica - AGORA USANDO A NOVA LÓGICA
-    pld_medio = pld_series.mean() if not pld_series.empty else None
-    
-    # Usar a nova análise térmica para determinar posição
-    posicao_termica = "indeterminada"
-    if cvu_medio is not None and pld_medio is not None and pld_medio > 0:
-        razao_cvu_pld = cvu_medio / pld_medio
-        percentual_cvu_pld = razao_cvu_pld * 100
-        
-        if percentual_cvu_pld > 150:
-            posicao_termica = "folga_estrutural"
-        elif percentual_cvu_pld >= 100:
-            posicao_termica = "risco_custo"
-        elif percentual_cvu_pld >= 95:
-            posicao_termica = "pressão_moderada"
-        else:
-            posicao_termica = "folga_operacional"
-
-    return {
-        "status": "disponível",
-        "stress_index": float(stress_index),
-        "correlacoes": {
-            "pld_vs_carga": corr_pld_carga,
-            "pld_vs_hidraulica": corr_pld_hidro,
-        },
-        "regime_mcp": regime,
-        "interpretação": {
-            "preço": formacao_preco,
-            "térmica": posicao_termica,
-        },
-    }
-
-
-# =====================================================================
 # ANÁLISE TÉRMICA REVISADA (V5) - COM DUPLA PERSPECTIVA
 # =====================================================================
 
@@ -2531,40 +2430,6 @@ def _analisar_tendencia_pld(pld_series: pd.Series) -> Dict[str, Any]:
 
 
 # =====================================================================
-# Ciclo do SIN
-# =====================================================================
-def classify_sin_cycle(
-    ear_medio: Optional[float],
-    ena_media: Optional[float],
-    stress_index: Optional[float],
-) -> Dict[str, Any]:
-
-    if ear_medio is None or stress_index is None:
-        return {
-            "cycle": "indeterminado",
-            "description": "Dados insuficientes para classificar o ciclo do SIN.",
-        }
-
-    if ear_medio > 75 and stress_index < 0.9:
-        cycle = "úmido"
-        desc = "Abundância hídrica com folga estrutural de oferta."
-    elif ear_medio < 45 and stress_index > 1.1:
-        cycle = "crítico"
-        desc = "Escassez hídrica com estresse estrutural do sistema."
-    elif stress_index > 1.0:
-        cycle = "seco"
-        desc = "Oferta pressionada, dependência térmica elevada."
-    else:
-        cycle = "transição"
-        desc = "Sistema em equilíbrio instável."
-
-    return {
-        "cycle": cycle,
-        "description": desc,
-    }
-
-
-# =====================================================================
 # Core builder
 # =====================================================================
 
@@ -2839,23 +2704,6 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data", forc
         ear_medio=hydrology.get("ear_medio")
     )
 
-    # ---------------- MCP Econômico ----------------
-    _core_log("MCP", "Calculando MCP econômico")
-    mcp_economico = compute_mcp_economico(
-        pld_series=pld_series,
-        carga_series=carga_sin_series,
-        geracao_hidraulica=geracao_hidro_sin_series,
-        cvu_medio=cvu_medio,
-    )
-    
-    # ---------------- Ciclo do SIN ----------------
-    _core_log("SIN_CYCLE", "Classificando ciclo do SIN")
-    sin_cycle = classify_sin_cycle(
-        ear_medio=hydrology.get("ear_medio"),
-        ena_media=hydrology.get("ena_media"),
-        stress_index=mcp_economico.get("stress_index"),
-    )
-
     # ---------------- Análises de PLD (NOVAS) ----------------
     # Calcular volatilidade normalizada
     volatilidade_norm = _calcular_volatilidade_normalizada(pld_series_full)
@@ -2927,8 +2775,6 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data", forc
     core = {
         "timestamp": datetime.now().isoformat(),
         "hydrology": hydrology,
-        "mcp_economico": mcp_economico,
-        "sin_cycle": sin_cycle,
         "renewables": {
             "curtailment": curtailment,
             "classificacao": classificacao_curtailment,
