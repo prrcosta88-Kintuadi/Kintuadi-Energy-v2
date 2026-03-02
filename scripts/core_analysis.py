@@ -59,18 +59,37 @@ def _duckdb_table_exists(con: Any, table_name: str) -> bool:
 
 def _duckdb_num_expr(col: str) -> str:
     """
-    Conversão numérica tolerante a formatos PT-BR e EN:
-    - '1.234,56' -> 1234.56
-    - '1234.56'   -> 1234.56
-    - '0,00E+00'  -> 0.0
+    Conversão robusta:
+    - Se já for numérico → usa direto
+    - Se for texto PT-BR → normaliza
     """
-    raw = f"TRIM(CAST({col} AS VARCHAR))"
-    normalized = (
-        f"CASE WHEN INSTR({raw}, ',') > 0 "
-        f"THEN REPLACE(REPLACE({raw}, '.', ''), ',', '.') "
-        f"ELSE {raw} END"
-    )
-    return f"TRY_CAST({normalized} AS DOUBLE)"
+    return f"""
+    CASE
+        WHEN TRY_CAST({col} AS DOUBLE) IS NOT NULL
+        THEN TRY_CAST({col} AS DOUBLE)
+        ELSE TRY_CAST(
+            REPLACE(
+                REPLACE(TRIM(CAST({col} AS VARCHAR)), '.', ''),
+                ',', '.'
+            )
+        AS DOUBLE)
+    END
+    """
+
+#def _duckdb_num_expr(col: str) -> str:
+    #"""
+    #Conversão numérica tolerante a formatos PT-BR e EN:
+    #- '1.234,56' -> 1234.56
+    #- '1234.56'   -> 1234.56
+    #- '0,00E+00'  -> 0.0
+    #"""
+    #raw = f"TRIM(CAST({col} AS VARCHAR))"
+    #normalized = (
+        #f"CASE WHEN INSTR({raw}, ',') > 0 "
+        #f"THEN REPLACE(REPLACE({raw}, '.', ''), ',', '.') "
+        #f"ELSE {raw} END"
+    #)
+    #return f"TRY_CAST({normalized} AS DOUBLE)"
 
 def _duckdb_date_expr(col: str) -> str:
     return (
@@ -419,6 +438,7 @@ def _compute_curtailment_from_csv(
         try:
             cols_info = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
             cols = {str(c[1]).lower(): str(c[1]) for c in cols_info}
+            print("Colunas detectadas:", cols)
 
             has_limitada = "val_geracaolimitada" in cols
             has_geracao = "val_geracao" in cols
@@ -469,6 +489,28 @@ def _compute_curtailment_from_csv(
                 {flag_filter}
             """
             df = con.execute(q).fetchdf()
+            print(df.head())
+            print(df["curtailment_abs"].isna().sum(), "valores NULL em curtailment_abs")
+            print(len(df), "total linhas")
+
+            # 🔎 DEBUG — verificar problema de cast
+            debug_df = con.execute(f"""
+                SELECT
+                    COUNT(*) AS total_linhas,
+                    COUNT({cols["val_geracaolimitada"]}) AS nao_nulos,
+                    SUM(
+                        CASE
+                            WHEN {cols["val_geracaolimitada"]} IS NOT NULL
+                            AND TRY_CAST({cols["val_geracaolimitada"]} AS DOUBLE) IS NULL
+                            THEN 1 ELSE 0
+                        END
+                    ) AS falhas_cast
+                FROM {table_name}
+            """).fetchdf()
+
+            print("\nDEBUG CAST:")
+            print(debug_df)
+
             return _finalize(df)
         except Exception:
             pass
