@@ -4,8 +4,63 @@ import pandas as pd
 from datetime import datetime, timedelta, date
 import logging
 from typing import List, Dict, Optional, Any
-from .data_models import PLDData, DataMetadata
-from .audit_logger import AuditLogger
+from io import BytesIO
+try:
+    from .data_models import PLDData, DataMetadata
+except Exception:
+    from dataclasses import dataclass
+
+    @dataclass
+    class DataMetadata:
+        source: str
+        collection_time: str
+        status: str
+        records_processed: int = 0
+        error_message: str = ""
+
+        def to_dict(self):
+            return {
+                "source": self.source,
+                "collection_time": self.collection_time,
+                "status": self.status,
+                "records_processed": self.records_processed,
+                "error_message": self.error_message,
+            }
+
+    @dataclass
+    class PLDData:
+        data: str
+        submercado: str
+        pld_valor: float
+        hora: int = 0
+        mes_referencia: int = 0
+        periodo_comercializacao: int = 0
+
+        def to_dict(self):
+            return {
+                "data": self.data,
+                "submercado": self.submercado,
+                "pld": self.pld_valor,
+                "pld_hora": self.pld_valor,
+                "hora": self.hora,
+                "mes_referencia": self.mes_referencia,
+                "periodo_comercializacao": self.periodo_comercializacao,
+            }
+
+try:
+    from .audit_logger import AuditLogger
+except Exception:
+    class AuditLogger:
+        def save_raw_data(self, *args, **kwargs):
+            return None
+        def log_data_transformation(self, *args, **kwargs):
+            return None
+        def log_consolidation(self, *args, **kwargs):
+            return None
+        def log_api_call(self, *args, **kwargs):
+            return None
+        def log_anomaly(self, *args, **kwargs):
+            return None
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +85,7 @@ class CCEEPLDCollector:
             "sumario_distribuicao_mensal": "9e8e3f5f-58a8-4744-b6da-7309a4513fcb",
         }
         self._resource_show_url = f"{self.base_url}/resource_show"
+        self._pld_2026_dump_xml = "https://dadosabertos.ccee.org.br/datastore/dump/3f279d6b-1069-42f7-9b0a-217b084729c4?format=xml"
     
     def collect_pld_data(self, days: int = 7) -> Dict:
         """Coleta dados PLD com auditoria completa"""
@@ -132,6 +188,134 @@ class CCEEPLDCollector:
         for name, resource_id in self._additional_datasets.items():
             datasets[name] = self._fetch_dataset(resource_id, limit=limit)
         return datasets
+
+
+    def collect_pld_historical(self) -> Dict[str, Any]:
+        """Compatibilidade com pipeline integrado: retorna datasets anuais de PLD.
+
+        Prioriza arquivos locais `data/ccee_pld_{ano}_*.csv`. Se não houver,
+        faz fallback para `collect_pld_data` e devolve datasets por ano em memória.
+        """
+        import glob
+        import os
+
+        datasets: List[Dict[str, Any]] = []
+
+        files = sorted(glob.glob(os.path.join("data", "ccee_pld_*.csv")))
+        for f in files:
+            base = os.path.basename(f)
+            parts = base.split("_")
+            year = None
+            for part in parts:
+                if part.isdigit() and len(part) == 4:
+                    year = int(part)
+                    break
+            if year is None:
+                continue
+            datasets.append({"year": year, "file": f})
+
+        # Sempre tenta atualizar janela recente para evitar defasagem do ano corrente
+        # (ex.: arquivo local parou em uma data anterior, mas API já possui novos dias).
+        pld_data = self.collect_pld_data(days=120)
+        records = pld_data.get("data", []) if isinstance(pld_data, dict) else []
+        if not records and datasets:
+            return {
+                "metadata": {
+                    "source": "CCEE_PLD",
+                    "status": "success",
+                    "datasets_collected": len(datasets),
+                    "collection_time": datetime.now().isoformat(),
+                },
+                "datasets": datasets,
+            }
+
+        if not records:
+            return {
+                "metadata": {
+                    "source": "CCEE_PLD",
+                    "status": "error",
+                    "datasets_collected": 0,
+                    "collection_time": datetime.now().isoformat(),
+                },
+                "datasets": [],
+            }
+
+        df = pd.DataFrame(records)
+        if "mes_referencia" in df.columns:
+            df["year"] = pd.to_numeric(df["mes_referencia"], errors="coerce").astype("Int64").astype(str).str[:4]
+        elif "MES_REFERENCIA" in df.columns:
+            df["year"] = pd.to_numeric(df["MES_REFERENCIA"], errors="coerce").astype("Int64").astype(str).str[:4]
+        else:
+            df["year"] = datetime.now().strftime("%Y")
+
+        # mescla local + API, priorizando API para o ano corrente
+        datasets_by_year: Dict[int, Dict[str, Any]] = {}
+        for ds in datasets:
+            try:
+                datasets_by_year[int(ds.get("year"))] = ds
+            except Exception:
+                continue
+
+        for y, g in df.groupby("year"):
+            try:
+                yi = int(y)
+            except Exception:
+                continue
+            datasets_by_year[yi] = {"year": yi, "records": g.to_dict(orient="records")}
+
+        recs_2026 = self._fetch_pld_2026_dump_xml_records()
+        if recs_2026:
+            datasets_by_year[2026] = {"year": 2026, "records": recs_2026}
+
+        merged_datasets = [datasets_by_year[k] for k in sorted(datasets_by_year.keys())]
+
+        return {
+            "metadata": {
+                "source": "CCEE_PLD",
+                "status": "success",
+                "datasets_collected": len(merged_datasets),
+                "collection_time": datetime.now().isoformat(),
+            },
+            "datasets": merged_datasets,
+        }
+
+    def _fetch_pld_2026_dump_xml_records(self) -> List[Dict[str, Any]]:
+        """Baixa dump XML direto do recurso PLD e retorna registros do ano de 2026."""
+        try:
+            response = requests.get(self._pld_2026_dump_xml, timeout=120)
+            response.raise_for_status()
+            content = response.content
+            if not content:
+                return []
+
+            try:
+                df = pd.read_xml(BytesIO(content), xpath="//record")
+            except Exception:
+                df = pd.read_xml(BytesIO(content))
+
+            if df is None or df.empty:
+                return []
+
+            cols_map = {str(c).strip().upper(): str(c) for c in df.columns}
+            keep = {}
+            for target in ["MES_REFERENCIA", "DIA", "HORA", "PLD_HORA", "SUBMERCADO"]:
+                src = cols_map.get(target)
+                if src is not None:
+                    keep[target] = df[src]
+
+            if not keep:
+                return []
+
+            out = pd.DataFrame(keep)
+            if "MES_REFERENCIA" in out.columns:
+                out = out[out["MES_REFERENCIA"].astype(str).str.startswith("2026")]
+            if out.empty:
+                return []
+
+            return out.to_dict(orient="records")
+        except Exception as e:
+            logger.warning(f"CCEE: Falha ao obter dump XML PLD 2026: {e}")
+            return []
 
     def collect_open_data_csv(self, limit: int = 500) -> Dict[str, Dict[str, Any]]:
         """Coleta datasets adicionais via links CSV (open data)."""
