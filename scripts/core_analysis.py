@@ -59,37 +59,18 @@ def _duckdb_table_exists(con: Any, table_name: str) -> bool:
 
 def _duckdb_num_expr(col: str) -> str:
     """
-    Conversão robusta:
-    - Se já for numérico → usa direto
-    - Se for texto PT-BR → normaliza
+    Conversão numérica tolerante a formatos PT-BR e EN:
+    - '1.234,56' -> 1234.56
+    - '1234.56'   -> 1234.56
+    - '0,00E+00'  -> 0.0
     """
-    return f"""
-    CASE
-        WHEN TRY_CAST({col} AS DOUBLE) IS NOT NULL
-        THEN TRY_CAST({col} AS DOUBLE)
-        ELSE TRY_CAST(
-            REPLACE(
-                REPLACE(TRIM(CAST({col} AS VARCHAR)), '.', ''),
-                ',', '.'
-            )
-        AS DOUBLE)
-    END
-    """
-
-#def _duckdb_num_expr(col: str) -> str:
-    #"""
-    #Conversão numérica tolerante a formatos PT-BR e EN:
-    #- '1.234,56' -> 1234.56
-    #- '1234.56'   -> 1234.56
-    #- '0,00E+00'  -> 0.0
-    #"""
-    #raw = f"TRIM(CAST({col} AS VARCHAR))"
-    #normalized = (
-        #f"CASE WHEN INSTR({raw}, ',') > 0 "
-        #f"THEN REPLACE(REPLACE({raw}, '.', ''), ',', '.') "
-        #f"ELSE {raw} END"
-    #)
-    #return f"TRY_CAST({normalized} AS DOUBLE)"
+    raw = f"TRIM(CAST({col} AS VARCHAR))"
+    normalized = (
+        f"CASE WHEN INSTR({raw}, ',') > 0 "
+        f"THEN REPLACE(REPLACE({raw}, '.', ''), ',', '.') "
+        f"ELSE {raw} END"
+    )
+    return f"TRY_CAST({normalized} AS DOUBLE)"
 
 def _duckdb_date_expr(col: str) -> str:
     return (
@@ -438,7 +419,6 @@ def _compute_curtailment_from_csv(
         try:
             cols_info = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
             cols = {str(c[1]).lower(): str(c[1]) for c in cols_info}
-            print("Colunas detectadas:", cols)
 
             has_limitada = "val_geracaolimitada" in cols
             has_geracao = "val_geracao" in cols
@@ -489,28 +469,6 @@ def _compute_curtailment_from_csv(
                 {flag_filter}
             """
             df = con.execute(q).fetchdf()
-            print(df.head())
-            print(df["curtailment_abs"].isna().sum(), "valores NULL em curtailment_abs")
-            print(len(df), "total linhas")
-
-            # 🔎 DEBUG — verificar problema de cast
-            debug_df = con.execute(f"""
-                SELECT
-                    COUNT(*) AS total_linhas,
-                    COUNT({cols["val_geracaolimitada"]}) AS nao_nulos,
-                    SUM(
-                        CASE
-                            WHEN {cols["val_geracaolimitada"]} IS NOT NULL
-                            AND TRY_CAST({cols["val_geracaolimitada"]} AS DOUBLE) IS NULL
-                            THEN 1 ELSE 0
-                        END
-                    ) AS falhas_cast
-                FROM {table_name}
-            """).fetchdf()
-
-            print("\nDEBUG CAST:")
-            print(debug_df)
-
             return _finalize(df)
         except Exception:
             pass
@@ -803,6 +761,46 @@ def _load_gfom_hourly_by_submarket(ons: Dict[str, Any]) -> Dict[str, pd.DataFram
         con.close()
 
 
+def _load_cmo_hourly_by_submarket() -> Dict[str, pd.Series]:
+    """Consolida CMO semi-horário em horário (média dos minutos 00 e 30) por submercado."""
+    if duckdb is None:
+        return {}
+    con = _duckdb_connect()
+    if con is None or not _duckdb_table_exists(con, "cmo"):
+        if con is not None:
+            con.close()
+        return {}
+    try:
+        q = f"""
+            SELECT
+                {_duckdb_date_expr('din_instante')} AS din_instante,
+                UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS sub_raw,
+                {_duckdb_num_expr('val_cmo')} AS val_cmo
+            FROM cmo
+            WHERE {_duckdb_date_expr('din_instante')} IS NOT NULL
+              AND {_duckdb_num_expr('val_cmo')} IS NOT NULL
+        """
+        df = con.execute(q).fetchdf()
+        if df.empty:
+            return {}
+        df["submercado"] = df["sub_raw"].map(_normalize_submercado_name)
+        df = df.dropna(subset=["submercado", "din_instante", "val_cmo"])
+        if df.empty:
+            return {}
+        df["hora"] = pd.to_datetime(df["din_instante"], errors="coerce").dt.floor("H")
+        df = df.dropna(subset=["hora"])
+        out: Dict[str, pd.Series] = {}
+        for sm, grp in df.groupby("submercado"):
+            s = grp.groupby("hora")["val_cmo"].mean().sort_index()
+            if not s.empty:
+                out[str(sm)] = _ensure_tz_naive_index(s.astype(float))
+        return out
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+
 def _load_capacidade_instalada_ativa_por_fonte(ons: Dict[str, Any]) -> Dict[str, float]:
     """
     Soma de val_potenciaefetiva (MW) por tipo de usina considerando apenas usinas ativas
@@ -880,6 +878,102 @@ def _load_disponibilidade_horaria(ons: Dict[str, Any]) -> pd.Series:
         con.close()
 
 
+def _load_dispsincronizada_total_horaria() -> pd.Series:
+    """Soma horária de val_dispsincronizada (capacidade sincronizada total)."""
+    if duckdb is None:
+        return pd.Series(dtype=float)
+    con = _duckdb_connect()
+    if con is None or not _duckdb_table_exists(con, "disponibilidade_usina"):
+        if con is not None:
+            con.close()
+        return pd.Series(dtype=float)
+    try:
+        q = f"""
+            SELECT
+                {_duckdb_date_expr('din_instante')} AS din_instante,
+                SUM({_duckdb_num_expr('val_dispsincronizada')}) AS disp_sync
+            FROM disponibilidade_usina
+            WHERE UPPER(TRIM(CAST(id_tipousina AS VARCHAR))) IN ('UHE','UTE','UTN')
+            GROUP BY 1
+            HAVING din_instante IS NOT NULL AND disp_sync IS NOT NULL
+            ORDER BY 1
+        """
+        df = con.execute(q).fetchdf()
+        if df.empty:
+            return pd.Series(dtype=float)
+        s = pd.Series(df["disp_sync"].values, index=pd.to_datetime(df["din_instante"]))
+        return _ensure_tz_naive_index(_normalize_power_to_mw(s).astype(float).sort_index())
+    except Exception:
+        return pd.Series(dtype=float)
+    finally:
+        con.close()
+
+
+def _load_gfom_components_hourly() -> pd.DataFrame:
+    """Componentes horários de despacho térmico (GFOM e decomposição)."""
+    cols_out = [
+        "ger",
+        "ordem_merito",
+        "inflex_pura",
+        "inflex_total",
+        "inflex_embut_merito",
+        "ordem_demerito_acima_inflex",
+        "razao_eletrica",
+        "constrained_off",
+        "gfom",
+    ]
+    if duckdb is None:
+        return pd.DataFrame(columns=cols_out)
+    con = _duckdb_connect()
+    if con is None or not _duckdb_table_exists(con, "despacho_gfom"):
+        if con is not None:
+            con.close()
+        return pd.DataFrame(columns=cols_out)
+    try:
+        info = con.execute("PRAGMA table_info('despacho_gfom')").fetchall()
+        cols = {str(c[1]).lower(): str(c[1]) for c in info}
+
+        def num_or_zero(name: str) -> str:
+            c = cols.get(name)
+            return _duckdb_num_expr(c) if c else "0"
+
+        q = f"""
+            SELECT
+                {_duckdb_date_expr(cols.get('din_instante', 'din_instante'))} AS din_instante,
+                SUM({num_or_zero('val_verifgeracao')}) AS ger,
+                SUM({num_or_zero('val_verifordemmerito')}) AS ordem_merito,
+                SUM({num_or_zero('val_verifinflexpura')}) AS inflex_pura,
+                SUM({num_or_zero('val_verifinflexibilidade')}) AS inflex_total,
+                SUM({num_or_zero('val_verifinflexembutmerito')}) AS inflex_embut_merito,
+                SUM({num_or_zero('val_verifordemdemeritoacimadainflex')}) AS ordem_demerito_acima_inflex,
+                SUM({num_or_zero('val_verifrazaoeletrica')}) AS razao_eletrica,
+                SUM({num_or_zero('val_verifconstrainedoff')}) AS constrained_off,
+                SUM({num_or_zero('val_verifgfom')}) AS gfom
+            FROM despacho_gfom
+            GROUP BY 1
+            HAVING din_instante IS NOT NULL
+            ORDER BY 1
+        """
+        df = con.execute(q).fetchdf()
+        if df.empty:
+            return pd.DataFrame(columns=cols_out)
+        out = df.set_index("din_instante")
+        out.index = pd.to_datetime(out.index, errors="coerce")
+        out = out[~out.index.isna()].sort_index()
+        return out[cols_out]
+    except Exception:
+        return pd.DataFrame(columns=cols_out)
+    finally:
+        con.close()
+
+
+def _series_to_hourly_dict(series: pd.Series, ndigits: int = 6) -> Dict[str, float]:
+    if not isinstance(series, pd.Series) or series.empty:
+        return {}
+    s = _ensure_tz_naive_index(pd.to_numeric(series, errors="coerce")).dropna().sort_index()
+    return {pd.Timestamp(i).strftime("%Y-%m-%d %H:%M:%S"): round(float(v), ndigits) for i, v in s.items()}
+
+
 def _load_carga_sin_horaria_duckdb() -> pd.Series:
     if duckdb is None:
         return pd.Series(dtype=float)
@@ -910,7 +1004,13 @@ def _load_carga_sin_horaria_duckdb() -> pd.Series:
 
 
 def _load_geracao_tipos_horaria_duckdb() -> Dict[str, pd.Series]:
-    out = {"solar": pd.Series(dtype=float), "eolica": pd.Series(dtype=float), "termica": pd.Series(dtype=float)}
+    out = {
+        "solar": pd.Series(dtype=float),
+        "eolica": pd.Series(dtype=float),
+        "termica": pd.Series(dtype=float),
+        "hidro": pd.Series(dtype=float),
+        "nuclear": pd.Series(dtype=float),
+    }
     if duckdb is None:
         return out
     con = _duckdb_connect()
@@ -934,12 +1034,18 @@ def _load_geracao_tipos_horaria_duckdb() -> Dict[str, pd.Series]:
         solar = df[df["k"].str.contains("fotov|solar", regex=True)]
         eolica = df[df["k"].str.contains("eol", regex=True)]
         termica = df[df["k"].str.contains("term", regex=True)]
+        hidro = df[df["k"].str.contains("hidro|hidraul", regex=True)]
+        nuclear = df[df["k"].str.contains("nuclear", regex=True)]
         if not solar.empty:
             out["solar"] = _ensure_tz_naive_index(solar.groupby("din_instante")["val_geracao"].sum().sort_index().astype(float))
         if not eolica.empty:
             out["eolica"] = _ensure_tz_naive_index(eolica.groupby("din_instante")["val_geracao"].sum().sort_index().astype(float))
         if not termica.empty:
             out["termica"] = _ensure_tz_naive_index(termica.groupby("din_instante")["val_geracao"].sum().sort_index().astype(float))
+        if not hidro.empty:
+            out["hidro"] = _ensure_tz_naive_index(hidro.groupby("din_instante")["val_geracao"].sum().sort_index().astype(float))
+        if not nuclear.empty:
+            out["nuclear"] = _ensure_tz_naive_index(nuclear.groupby("din_instante")["val_geracao"].sum().sort_index().astype(float))
         return out
     except Exception:
         return out
@@ -1156,10 +1262,14 @@ def _compute_advanced_cross_metrics(
     solar_key = next((k for k in generation.keys() if any(t in _normalize_text_key(k) for t in ["solar", "fotov"])) , None)
     eolica_key = next((k for k in generation.keys() if any(t in _normalize_text_key(k) for t in ["eolica", "eolie", "eoli"])) , None)
     termica_key = next((k for k in generation.keys() if "termica" in _normalize_text_key(k)), None)
+    hidro_key = next((k for k in generation.keys() if any(t in _normalize_text_key(k) for t in ["hidro", "hidraul"])) , None)
+    nuclear_key = next((k for k in generation.keys() if "nuclear" in _normalize_text_key(k)), None)
 
     solar = _ensure_tz_naive_index(_to_series(generation.get(solar_key, {}).get("serie", []), "geracao")) if solar_key else pd.Series(dtype=float)
     eolica = _ensure_tz_naive_index(_to_series(generation.get(eolica_key, {}).get("serie", []), "geracao")) if eolica_key else pd.Series(dtype=float)
     termica = _ensure_tz_naive_index(_to_series(generation.get(termica_key, {}).get("serie", []), "geracao")) if termica_key else pd.Series(dtype=float)
+    hidro = _ensure_tz_naive_index(_to_series(generation.get(hidro_key, {}).get("serie", []), "geracao")) if hidro_key else pd.Series(dtype=float)
+    nuclear = _ensure_tz_naive_index(_to_series(generation.get(nuclear_key, {}).get("serie", []), "geracao")) if nuclear_key else pd.Series(dtype=float)
 
     tipos_db = _load_geracao_tipos_horaria_duckdb()
     if not tipos_db.get("solar", pd.Series(dtype=float)).empty:
@@ -1168,6 +1278,10 @@ def _compute_advanced_cross_metrics(
         eolica = _ensure_tz_naive_index(tipos_db["eolica"])
     if not tipos_db.get("termica", pd.Series(dtype=float)).empty:
         termica = _ensure_tz_naive_index(tipos_db["termica"])
+    if not tipos_db.get("hidro", pd.Series(dtype=float)).empty:
+        hidro = _ensure_tz_naive_index(tipos_db["hidro"])
+    if not tipos_db.get("nuclear", pd.Series(dtype=float)).empty:
+        nuclear = _ensure_tz_naive_index(tipos_db["nuclear"])
 
     total_key = "sin" if "sin" in generation else None
     geracao_total = _ensure_tz_naive_index(_to_series(generation.get(total_key, {}).get("serie", []), "geracao")) if total_key else pd.Series(dtype=float)
@@ -1290,6 +1404,14 @@ def _compute_advanced_cross_metrics(
     ena_media_diaria = None
     ear_diaria_por_submercado = {}
     ena_diaria_por_submercado = {}
+    ear_percentual_diaria_sin = None
+    ear_percentual_diaria_por_submercado = {}
+    ena_bruta_mwmed_diaria_sin = None
+    ena_bruta_mwmed_diaria_por_submercado = {}
+    ena_bruta_percentualmlt_diaria_sin = None
+    ena_bruta_percentualmlt_diaria_por_submercado = {}
+    ena_armazenavel_percentualmlt_diaria_sin = None
+    ena_armazenavel_percentualmlt_diaria_por_submercado = {}
     ear_low_thr = None
     ear_high_thr = None
     matriz_cenario_mensal: List[Dict[str, Any]] = []
@@ -1335,10 +1457,11 @@ def _compute_advanced_cross_metrics(
                     q_ear_d = f"""
                         SELECT DATE_TRUNC('day', {_duckdb_date_expr('ear_data')}) AS dia,
                                UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS sub_raw,
-                               SUM({_duckdb_num_expr('ear_verif_subsistema_mwmes')}) AS ear_val
+                               SUM({_duckdb_num_expr('ear_verif_subsistema_mwmes')}) AS ear_val,
+                               AVG({_duckdb_num_expr('ear_verif_subsistema_percentual')}) AS ear_pct
                         FROM ear_diario_subsistema
                         GROUP BY 1,2
-                        HAVING dia IS NOT NULL AND ear_val IS NOT NULL
+                        HAVING dia IS NOT NULL
                         ORDER BY 1
                     """
                     dfe = con.execute(q_ear_d).fetchdf()
@@ -1350,21 +1473,37 @@ def _compute_advanced_cross_metrics(
                             ear_diaria_por_submercado[str(sm)] = {
                                 pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
                                 for i, v in zip(grp["dia"], grp["ear_val"])
+                                if pd.notna(v)
+                            }
+                            ear_percentual_diaria_por_submercado[str(sm)] = {
+                                pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                                for i, v in zip(grp["dia"], grp["ear_pct"])
+                                if pd.notna(v)
                             }
                         dfe_sin = dfe.groupby("dia", as_index=False)["ear_val"].sum()
                         ear_media_diaria = {
                             pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
                             for i, v in zip(dfe_sin["dia"], dfe_sin["ear_val"])
+                            if pd.notna(v)
+                        }
+                        dfe_pct = dfe.groupby("dia", as_index=False)["ear_pct"].mean()
+                        ear_percentual_diaria_sin = {
+                            pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                            for i, v in zip(dfe_pct["dia"], dfe_pct["ear_pct"])
+                            if pd.notna(v)
                         }
 
                 if _duckdb_table_exists(con, "ena_diario_subsistema"):
                     q_ena_d = f"""
                         SELECT DATE_TRUNC('day', {_duckdb_date_expr('ena_data')}) AS dia,
                                UPPER(TRIM(CAST(COALESCE(nom_subsistema, id_subsistema) AS VARCHAR))) AS sub_raw,
-                               SUM({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}) AS ena_val
+                               SUM({_duckdb_num_expr('ena_armazenavel_regiao_mwmed')}) AS ena_val,
+                               AVG({_duckdb_num_expr('ena_armazenavel_regiao_percentualmlt')}) AS ena_arm_pct,
+                               SUM({_duckdb_num_expr('ena_bruta_regiao_mwmed')}) AS ena_bruta_mwmed,
+                               AVG({_duckdb_num_expr('ena_bruta_regiao_percentualmlt')}) AS ena_bruta_pct
                         FROM ena_diario_subsistema
                         GROUP BY 1,2
-                        HAVING dia IS NOT NULL AND ena_val IS NOT NULL
+                        HAVING dia IS NOT NULL
                         ORDER BY 1
                     """
                     dfn = con.execute(q_ena_d).fetchdf()
@@ -1376,11 +1515,46 @@ def _compute_advanced_cross_metrics(
                             ena_diaria_por_submercado[str(sm)] = {
                                 pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
                                 for i, v in zip(grp["dia"], grp["ena_val"])
+                                if pd.notna(v)
+                            }
+                            ena_bruta_mwmed_diaria_por_submercado[str(sm)] = {
+                                pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                                for i, v in zip(grp["dia"], grp["ena_bruta_mwmed"])
+                                if pd.notna(v)
+                            }
+                            ena_bruta_percentualmlt_diaria_por_submercado[str(sm)] = {
+                                pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                                for i, v in zip(grp["dia"], grp["ena_bruta_pct"])
+                                if pd.notna(v)
+                            }
+                            ena_armazenavel_percentualmlt_diaria_por_submercado[str(sm)] = {
+                                pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                                for i, v in zip(grp["dia"], grp["ena_arm_pct"])
+                                if pd.notna(v)
                             }
                         dfn_sin = dfn.groupby("dia", as_index=False)["ena_val"].sum()
                         ena_media_diaria = {
                             pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
                             for i, v in zip(dfn_sin["dia"], dfn_sin["ena_val"])
+                            if pd.notna(v)
+                        }
+                        dfn_bruta_sin = dfn.groupby("dia", as_index=False)["ena_bruta_mwmed"].sum()
+                        ena_bruta_mwmed_diaria_sin = {
+                            pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                            for i, v in zip(dfn_bruta_sin["dia"], dfn_bruta_sin["ena_bruta_mwmed"])
+                            if pd.notna(v)
+                        }
+                        dfn_bruta_pct = dfn.groupby("dia", as_index=False)["ena_bruta_pct"].mean()
+                        ena_bruta_percentualmlt_diaria_sin = {
+                            pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                            for i, v in zip(dfn_bruta_pct["dia"], dfn_bruta_pct["ena_bruta_pct"])
+                            if pd.notna(v)
+                        }
+                        dfn_arm_pct = dfn.groupby("dia", as_index=False)["ena_arm_pct"].mean()
+                        ena_armazenavel_percentualmlt_diaria_sin = {
+                            pd.Timestamp(i).strftime("%Y-%m-%d"): float(v)
+                            for i, v in zip(dfn_arm_pct["dia"], dfn_arm_pct["ena_arm_pct"])
+                            if pd.notna(v)
                         }
             except Exception:
                 pass
@@ -1500,7 +1674,7 @@ def _compute_advanced_cross_metrics(
                     info = con.execute(f"PRAGMA table_info('{t}')").fetchall()
                     cols = {c[1].lower(): c[1] for c in info}
                     ts_col = cols.get("instante") or cols.get("din_instante")
-                    interc_col = cols.get("intercambio")
+                    interc_col = cols.get("intercambio") or cols.get("val_intercambiomwmed")
                     lim_col = cols.get("limite")
                     if not ts_col or (not interc_col and not lim_col):
                         continue
@@ -1557,7 +1731,7 @@ def _compute_advanced_cross_metrics(
             elif total_gfom == 0:
                 gfom_pct = "não houve despacho de térmica fora de mérito"
             else:
-                gfom_pct = float((total_gfom / total_ger) * 100)
+                gfom_pct = round(float((total_gfom / total_ger) * 100), 4)
 
             if not pld_series.empty:
                 gfom_pct_h = (gfom_h["gfom"] / gfom_h["ger"].replace(0, np.nan)) * 100
@@ -1600,11 +1774,22 @@ def _compute_advanced_cross_metrics(
             gfom_pct_sm = _ensure_tz_naive_index(gfom_pct_sm)
             key_pct = f"gfom_{sm_suffix.get(sm, sm.lower())}_pct"
             gfom_vs_pld_por_submercado[sm] = {
-                key_pct: float((gfdf["gfom"].sum() / gfdf["ger"].sum()) * 100) if gfdf["ger"].sum() > 0 else None,
+                key_pct: round(float((gfdf["gfom"].sum() / gfdf["ger"].sum()) * 100), 4) if gfdf["ger"].sum() > 0 else None,
                 "corr": _safe_corr(pld_sm, gfom_pct_sm, min_points=24),
             }
         except Exception as e:
             gfom_vs_pld_por_submercado[sm] = {"erro": str(e)}
+
+    cmo_horario_por_submercado: Dict[str, Dict[str, float]] = {}
+    try:
+        cmo_by_sm = _load_cmo_hourly_by_submarket()
+        for sm, ser in cmo_by_sm.items():
+            cmo_horario_por_submercado[sm] = {
+                pd.Timestamp(i).strftime("%Y-%m-%d %H:%M:%S"): float(v)
+                for i, v in ser.dropna().sort_index().items()
+            }
+    except Exception as e:
+        step_errors["cmo_horario_por_submercado"] = str(e)
 
     # Curtailement estrutural vs elétrico (nova abordagem)
     curtailment_class_nova = "indisponível"
@@ -1708,7 +1893,7 @@ def _compute_advanced_cross_metrics(
 
             matriz_cenario_diaria.append({
                 "dia": pd.Timestamp(d).strftime("%Y-%m-%d"),
-                "gfom_pct": None if pd.isna(gpv) else float(gpv),
+                "gfom_pct": None if pd.isna(gpv) else round(float(gpv), 4),
                 "gfom_vs_pld_corr": None if pd.isna(gcv) else float(gcv),
                 "curtailment_estado": curt_state,
                 "stress_operacional_medio": None if pd.isna(stv) else float(stv),
@@ -1753,7 +1938,7 @@ def _compute_advanced_cross_metrics(
             gx = gx[~gx.index.isna()].groupby(level=0).sum().sort_index()
             ger_s = gx.get("ger", pd.Series(dtype=float)).astype(float)
             gf_s = gx.get("gfom", pd.Series(dtype=float)).astype(float)
-            pct = (gf_s / ger_s.replace(0, np.nan)) * 100
+            pct = ((gf_s / ger_s.replace(0, np.nan)) * 100).round(4)
             pct = pct.replace([np.inf, -np.inf], np.nan)
             gfom_pct_hor = pct.astype(object)
             gfom_pct_hor.loc[ger_s.fillna(0) == 0] = "não houve despacho de térmica"
@@ -1807,6 +1992,193 @@ def _compute_advanced_cross_metrics(
     except Exception as e:
         step_errors["painel_horario_renovavel"] = str(e)
 
+    gfom_horario = []
+    despacho_termico_horario = []
+    try:
+        if isinstance(gfom_h, pd.DataFrame) and not gfom_h.empty:
+            gfh = gfom_h.copy()
+            gfh.index = pd.to_datetime(gfh.index, errors="coerce", utc=True).tz_localize(None)
+            gfh = gfh[~gfh.index.isna()].groupby(level=0).sum().sort_index()
+            gfom_horario = [
+                {"instante": i.strftime("%Y-%m-%d %H:%M:%S"), "valor": float(v)}
+                for i, v in gfh.get("gfom", pd.Series(dtype=float)).dropna().items()
+            ]
+            despacho_termico_horario = [
+                {"instante": i.strftime("%Y-%m-%d %H:%M:%S"), "valor": float(v)}
+                for i, v in gfh.get("ger", pd.Series(dtype=float)).dropna().items()
+            ]
+    except Exception as e:
+        step_errors["gfom_horario_series"] = str(e)
+
+    # -----------------------------------------------------------------
+    # Decomposição Econômica Operacional Horária (determinística)
+    # -----------------------------------------------------------------
+    economic: Dict[str, Any] = {}
+    try:
+        # Séries-base
+        pld_h = _ensure_tz_naive_index(pld_series)
+        if not pld_series_by_submercado:
+            pld_series_by_submercado = {}
+
+        # CMO horário por submercado (média de :00 e :30)
+        cmo_by_sm = _load_cmo_hourly_by_submarket()
+
+        # Escolha determinística do submercado dominante para CVaR implícito
+        dom_order = ["SUDESTE", "SUL", "NORDESTE", "NORTE"]
+        dominant_sm = None
+        for sm in dom_order:
+            if sm in pld_series_by_submercado and sm in cmo_by_sm and not pld_series_by_submercado[sm].empty and not cmo_by_sm[sm].empty:
+                dominant_sm = sm
+                break
+        if dominant_sm is None:
+            commons = [sm for sm in pld_series_by_submercado.keys() if sm in cmo_by_sm]
+            if commons:
+                dominant_sm = commons[0]
+
+        if dominant_sm is not None:
+            pld_dom = _ensure_tz_naive_index(pld_series_by_submercado.get(dominant_sm, pd.Series(dtype=float)))
+            cmo_dom = _ensure_tz_naive_index(cmo_by_sm.get(dominant_sm, pd.Series(dtype=float)))
+            if not pld_dom.empty:
+                pld_h = pld_dom
+        else:
+            cmo_dom = pd.Series(dtype=float)
+
+        # GFOM componentes
+        gfom_comp = _load_gfom_components_hourly()
+        thermal_inflex = _ensure_tz_naive_index(gfom_comp.get("inflex_pura", pd.Series(dtype=float))) if not gfom_comp.empty else pd.Series(dtype=float)
+        thermal_merit = _ensure_tz_naive_index(gfom_comp.get("ordem_merito", pd.Series(dtype=float))) if not gfom_comp.empty else pd.Series(dtype=float)
+
+        # Capacidade sincronizada total
+        disp_sync_total = _load_dispsincronizada_total_horaria()
+
+        # Curtailment/renovável disponível horários
+        curtailed_h = pd.Series(dtype=float)
+        avail_ren_h = pd.Series(dtype=float)
+        if isinstance(restr_h, pd.DataFrame) and not restr_h.empty:
+            rr = restr_h.copy()
+            rr["instante"] = pd.to_datetime(rr["instante"], errors="coerce")
+            rr = rr.dropna(subset=["instante"])
+            curtailed_h = _ensure_tz_naive_index(
+                pd.Series(
+                    pd.to_numeric(rr.get("val_geracaolimitada_solar"), errors="coerce").fillna(0).values
+                    + pd.to_numeric(rr.get("val_geracaolimitada_eolica"), errors="coerce").fillna(0).values,
+                    index=rr["instante"],
+                )
+            )
+            avail_ren_h = _ensure_tz_naive_index(pd.Series(pd.to_numeric(rr.get("renov_disponivel"), errors="coerce").values, index=rr["instante"]))
+
+        # CVU semanal -> horário
+        cvu_weekly = _load_cvu_weekly_series(ons)
+
+        # Índice comum horário para computar todos os termos de forma vetorizada
+        idx = pd.DatetimeIndex([])
+        for ser in [pld_h, cmo_dom, carga_sin, solar, eolica, termica, hidro, nuclear, thermal_inflex, thermal_merit, disp_sync_total, curtailed_h, avail_ren_h]:
+            if isinstance(ser, pd.Series) and not ser.empty:
+                idx = idx.union(pd.DatetimeIndex(ser.index))
+
+        if not idx.empty:
+            idx = idx.sort_values().unique()
+            df_e = pd.DataFrame(index=idx)
+            df_e["pld"] = pd.to_numeric(pld_h.reindex(idx), errors="coerce")
+            df_e["cmo"] = pd.to_numeric(cmo_dom.reindex(idx), errors="coerce")
+            df_e["load"] = pd.to_numeric(carga_sin.reindex(idx), errors="coerce")
+            df_e["solar"] = pd.to_numeric(solar.reindex(idx), errors="coerce")
+            df_e["wind"] = pd.to_numeric(eolica.reindex(idx), errors="coerce")
+            df_e["thermal_total"] = pd.to_numeric(termica.reindex(idx), errors="coerce")
+            df_e["hydro"] = pd.to_numeric(hidro.reindex(idx), errors="coerce")
+            df_e["nuclear"] = pd.to_numeric(nuclear.reindex(idx), errors="coerce")
+            df_e["thermal_inflex"] = pd.to_numeric(thermal_inflex.reindex(idx), errors="coerce")
+            df_e["thermal_merit"] = pd.to_numeric(thermal_merit.reindex(idx), errors="coerce")
+            df_e["disp_sync_total"] = pd.to_numeric(disp_sync_total.reindex(idx), errors="coerce")
+            df_e["curtailed"] = pd.to_numeric(curtailed_h.reindex(idx), errors="coerce")
+            df_e["avail_ren"] = pd.to_numeric(avail_ren_h.reindex(idx), errors="coerce")
+
+            if not cvu_weekly.empty:
+                cvu_ref = _ensure_tz_naive_index(cvu_weekly.sort_index())
+                df_e["cvu_semana"] = cvu_ref.reindex(idx, method="ffill")
+                if df_e["cvu_semana"].isna().all():
+                    df_e["cvu_semana"] = cvu_ref.reindex(idx, method="bfill")
+            else:
+                df_e["cvu_semana"] = np.nan
+
+            # EAR/ENA diários -> horários
+            ear_pct_d = pd.Series({pd.to_datetime(k): v for k, v in (ear_percentual_diaria_sin or {}).items()}) if ear_percentual_diaria_sin else pd.Series(dtype=float)
+            ena_arm_pct_d = pd.Series({pd.to_datetime(k): v for k, v in (ena_armazenavel_percentualmlt_diaria_sin or {}).items()}) if ena_armazenavel_percentualmlt_diaria_sin else pd.Series(dtype=float)
+            if not ear_pct_d.empty:
+                df_e["ear_pct"] = ear_pct_d.reindex(pd.DatetimeIndex(df_e.index.floor("D"))).values
+            else:
+                df_e["ear_pct"] = np.nan
+            if not ena_arm_pct_d.empty:
+                df_e["ena_arm_pct"] = ena_arm_pct_d.reindex(pd.DatetimeIndex(df_e.index.floor("D"))).values
+            else:
+                df_e["ena_arm_pct"] = np.nan
+
+            # Step 1 — Normalizações
+            df_e["EAR_norm"] = (df_e["ear_pct"] / 100.0).clip(lower=0, upper=1)
+            df_e["ENA_norm"] = (df_e["ena_arm_pct"] / 100.0).clip(lower=0, upper=1)
+            df_e["Load_norm"] = df_e["load"] / df_e["disp_sync_total"].replace(0, np.nan)
+            df_e["Curtailment_norm"] = df_e["curtailed"] / df_e["avail_ren"].replace(0, np.nan)
+            df_e["Thermal_inflex_ratio"] = (df_e["thermal_inflex"] / df_e["thermal_total"].replace(0, np.nan)).clip(lower=0, upper=1)
+
+            # Step 2-10
+            df_e["SIN_cost_R$/h"] = df_e["load"] * df_e["pld"]
+            df_e["thermal_real_cost"] = df_e["thermal_total"] * df_e["cvu_semana"]
+            df_e["thermal_merit_cost"] = df_e["thermal_merit"] * df_e["cvu_semana"]
+            df_e["thermal_prudential_dispatch"] = df_e["thermal_total"] - df_e["thermal_merit"]
+
+            df_e["mandatory_generation"] = df_e[["wind", "solar", "nuclear", "thermal_inflex"]].sum(axis=1, min_count=1)
+            df_e["required_hydro"] = (df_e["load"] - df_e["mandatory_generation"]).clip(lower=0)
+            df_e["Hydro_gap"] = df_e["hydro"] - df_e["required_hydro"]
+            tol = 1e-6
+            df_e["system_state"] = np.where(
+                df_e["Hydro_gap"] > tol,
+                "Hydro Preservation",
+                np.where(df_e["Hydro_gap"].abs() <= tol, "Hydro Necessary", "Hydro Deficit"),
+            )
+
+            df_e["Hydro_preserved"] = (df_e["required_hydro"] - df_e["hydro"]).clip(lower=0)
+            df_e["Water_value_R$/h"] = df_e["Hydro_preserved"] * df_e["pld"]
+            df_e["Curtailment_loss_R$/h"] = df_e["curtailed"] * df_e["pld"]
+            df_e["avoidable_curtailment"] = df_e["curtailed"] * (1 - df_e["Thermal_inflex_ratio"].fillna(1))
+
+            df_e["CVaR_implicit"] = (df_e["pld"] - df_e["cmo"]).clip(lower=0)
+            df_e["Risk_Aversion_Gap"] = df_e["CVaR_implicit"] - df_e["cvu_semana"]
+            df_e["T_prudencia"] = df_e["thermal_prudential_dispatch"] * (df_e["cvu_semana"] - df_e["pld"])
+
+            df_e["T_total"] = df_e["SIN_cost_R$/h"]
+            df_e["T_eletric"] = df_e["thermal_merit_cost"]
+            df_e["T_hidro"] = df_e["Water_value_R$/h"]
+
+            economic = {
+                "dominant_submarket": dominant_sm,
+                "normalization_hourly": {
+                    "EAR_norm": _series_to_hourly_dict(df_e["EAR_norm"]),
+                    "ENA_norm": _series_to_hourly_dict(df_e["ENA_norm"]),
+                    "Load_norm": _series_to_hourly_dict(df_e["Load_norm"]),
+                    "Curtailment_norm": _series_to_hourly_dict(df_e["Curtailment_norm"]),
+                    "Thermal_inflex_ratio": _series_to_hourly_dict(df_e["Thermal_inflex_ratio"]),
+                },
+                "sin_cost_hourly": _series_to_hourly_dict(df_e["SIN_cost_R$/h"], ndigits=4),
+                "thermal_real_cost_hourly": _series_to_hourly_dict(df_e["thermal_real_cost"], ndigits=4),
+                "thermal_merit_cost_hourly": _series_to_hourly_dict(df_e["thermal_merit_cost"], ndigits=4),
+                "thermal_prudential_dispatch_hourly": _series_to_hourly_dict(df_e["thermal_prudential_dispatch"], ndigits=4),
+                "required_hydro_hourly": _series_to_hourly_dict(df_e["required_hydro"], ndigits=4),
+                "mandatory_generation_hourly": _series_to_hourly_dict(df_e["mandatory_generation"], ndigits=4),
+                "hydro_gap_hourly": _series_to_hourly_dict(df_e["Hydro_gap"], ndigits=4),
+                "system_state_hourly": {pd.Timestamp(i).strftime("%Y-%m-%d %H:%M:%S"): str(v) for i, v in df_e["system_state"].items()},
+                "water_value_hourly": _series_to_hourly_dict(df_e["Water_value_R$/h"], ndigits=4),
+                "curtailment_loss_hourly": _series_to_hourly_dict(df_e["Curtailment_loss_R$/h"], ndigits=4),
+                "avoidable_curtailment_hourly": _series_to_hourly_dict(df_e["avoidable_curtailment"], ndigits=4),
+                "CVaR_implicit_hourly": _series_to_hourly_dict(df_e["CVaR_implicit"], ndigits=4),
+                "Risk_Aversion_Gap_hourly": _series_to_hourly_dict(df_e["Risk_Aversion_Gap"], ndigits=4),
+                "T_prudencia_hourly": _series_to_hourly_dict(df_e["T_prudencia"], ndigits=4),
+                "T_total_hourly": _series_to_hourly_dict(df_e["T_total"], ndigits=4),
+                "T_eletric_hourly": _series_to_hourly_dict(df_e["T_eletric"], ndigits=4),
+                "T_hidro_hourly": _series_to_hourly_dict(df_e["T_hidro"], ndigits=4),
+            }
+    except Exception as e:
+        step_errors["economic_decomposition"] = str(e)
+
     return {
         "status": "parcial" if step_errors else "disponível",
         "diagnostico_etapas": step_errors,
@@ -1822,6 +2194,14 @@ def _compute_advanced_cross_metrics(
         "ena_diaria_sin": ena_media_diaria,
         "ear_diaria_por_submercado": ear_diaria_por_submercado,
         "ena_diaria_por_submercado": ena_diaria_por_submercado,
+        "ear_percentual_diaria_sin": ear_percentual_diaria_sin,
+        "ear_percentual_diaria_por_submercado": ear_percentual_diaria_por_submercado,
+        "ena_bruta_mwmed_diaria_sin": ena_bruta_mwmed_diaria_sin,
+        "ena_bruta_mwmed_diaria_por_submercado": ena_bruta_mwmed_diaria_por_submercado,
+        "ena_bruta_percentualmlt_diaria_sin": ena_bruta_percentualmlt_diaria_sin,
+        "ena_bruta_percentualmlt_diaria_por_submercado": ena_bruta_percentualmlt_diaria_por_submercado,
+        "ena_armazenavel_percentualmlt_diaria_sin": ena_armazenavel_percentualmlt_diaria_sin,
+        "ena_armazenavel_percentualmlt_diaria_por_submercado": ena_armazenavel_percentualmlt_diaria_por_submercado,
         "ear_media_diaria": ear_media_diaria,
         "ena_media_diaria": ena_media_diaria,
         "matriz_cenario_mensal": matriz_cenario_mensal,
@@ -1863,11 +2243,14 @@ def _compute_advanced_cross_metrics(
             "pld_vs_ear_mensal_por_submercado": pld_vs_ear_mensal_por_submercado,
             "pld_vs_ena_mensal_por_submercado": pld_vs_ena_mensal_por_submercado,
             "gfom_pct": gfom_pct,
+            "gfom_horario_mwmed": gfom_horario,
+            "despacho_termico_horario_mwmed": despacho_termico_horario,
             "gfom_vs_pld_corr": gfom_pld_corr,
             "gfom_vs_pld_cenario": gfom_pld_cenario,
             "horas_cenario_A": gfom_alto_pld_baixo,
             "horas_cenario_B": gfom_alto_pld_alto,
             "gfom_vs_pld_por_submercado": gfom_vs_pld_por_submercado,
+            "cmo_horario_por_submercado": cmo_horario_por_submercado,
         },
         "capacidade_operativa_real": {
             "capacidade_disponivel_real_media_mw": float(capacidade_disp_h.mean()) if not capacidade_disp_h.empty else None,
@@ -1885,6 +2268,7 @@ def _compute_advanced_cross_metrics(
             "isr_ultimo": isr_medio,
         },
         "painel_horario_renovavel": painel_horario_renovavel,
+        "economic": economic,
         "mudanca_regime_historica_trimestral": mudanca_regime_trimestral,
     }
 
@@ -2843,6 +3227,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data", forc
         # ESTRUTURA REVISADA: Análise térmica com dupla perspectiva
         "thermal_analysis": {**indicadores_termicos, "cvu_semanal": {d.strftime("%Y-%m-%d"): float(v) for d, v in cvu_semanal.items()} if not cvu_semanal.empty else {}, "cvu_diario": {d.strftime("%Y-%m-%d"): float(v) for d, v in cvu_diario.items()} if not cvu_diario.empty else {}},
         "advanced_metrics": metricas_avancadas,
+        "economic": metricas_avancadas.get("economic", {}) if isinstance(metricas_avancadas, dict) else {},
         "operacao": operacao,
         "alerts": alerts,
         "metadata": {

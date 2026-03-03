@@ -99,12 +99,26 @@ class KintuadiIntegratedCollectorV2:
                 if df_src.empty:
                     return
                 con.register("df_src_tmp", df_src)
+
+                # === EVOLUÇÃO AUTOMÁTICA DE SCHEMA (XLSX) ===
+                src_info = con.execute("PRAGMA table_info('df_src_tmp')").fetchall()
+                src_cols_map = {str(c[1]).strip().lower(): str(c[1]) for c in src_info}
+
                 con.execute(
                     f"""
                     CREATE TABLE IF NOT EXISTS {table_name} AS
                     SELECT * FROM df_src_tmp LIMIT 0
                     """
                 )
+
+                existing_cols_info = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+                existing_cols = {str(c[1]).strip().lower() for c in existing_cols_info}
+
+                for src_col_lower, src_col_original in src_cols_map.items():
+                    if src_col_lower not in existing_cols:
+                        logger.info(f"Adicionando nova coluna '{src_col_original}' em {table_name}")
+                        con.execute(f'ALTER TABLE {table_name} ADD COLUMN "{src_col_original}" VARCHAR')
+                # ============================================
             else:
                 con.execute(
                     f"""
@@ -146,15 +160,6 @@ class KintuadiIntegratedCollectorV2:
                 # XLSX com schema variável: alinhar por nome de coluna para evitar BinderError.
                 src_info = con.execute("PRAGMA table_info('df_src_tmp')").fetchall()
                 src_cols_map = {str(c[1]).strip().lower(): str(c[1]) for c in src_info}
-                # === EVOLUÇÃO AUTOMÁTICA DE SCHEMA (XLSX) ===
-                existing_cols_info = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
-                existing_cols = {str(c[1]).strip().lower() for c in existing_cols_info}
-
-                for src_col_lower, src_col_original in src_cols_map.items():
-                    if src_col_lower not in existing_cols:
-                        logger.info(f"Adicionando nova coluna '{src_col_original}' em {table_name}")
-                        con.execute(f'ALTER TABLE {table_name} ADD COLUMN "{src_col_original}" VARCHAR')
-                # ============================================
 
                 select_expr = []
                 for col in col_names:
@@ -196,9 +201,10 @@ class KintuadiIntegratedCollectorV2:
                     [file_path],
                 )
 
+                # === EVOLUÇÃO AUTOMÁTICA DE SCHEMA (CSV) ===
                 src_info = con.execute("PRAGMA table_info('_src_csv_tmp')").fetchall()
                 src_cols_map = {str(c[1]).strip().lower(): str(c[1]) for c in src_info}
-                # === EVOLUÇÃO AUTOMÁTICA DE SCHEMA (CSV) ===
+
                 existing_cols_info = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
                 existing_cols = {str(c[1]).strip().lower() for c in existing_cols_info}
 

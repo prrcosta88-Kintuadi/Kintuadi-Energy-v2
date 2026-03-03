@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta, date
 import logging
 from typing import List, Dict, Optional, Any
+from io import BytesIO
 try:
     from .data_models import PLDData, DataMetadata
 except Exception:
@@ -84,6 +85,7 @@ class CCEEPLDCollector:
             "sumario_distribuicao_mensal": "9e8e3f5f-58a8-4744-b6da-7309a4513fcb",
         }
         self._resource_show_url = f"{self.base_url}/resource_show"
+        self._pld_2026_dump_xml = "https://dadosabertos.ccee.org.br/datastore/dump/3f279d6b-1069-42f7-9b0a-217b084729c4?format=xml"
     
     def collect_pld_data(self, days: int = 7) -> Dict:
         """Coleta dados PLD com auditoria completa"""
@@ -261,6 +263,10 @@ class CCEEPLDCollector:
                 continue
             datasets_by_year[yi] = {"year": yi, "records": g.to_dict(orient="records")}
 
+        recs_2026 = self._fetch_pld_2026_dump_xml_records()
+        if recs_2026:
+            datasets_by_year[2026] = {"year": 2026, "records": recs_2026}
+
         merged_datasets = [datasets_by_year[k] for k in sorted(datasets_by_year.keys())]
 
         return {
@@ -272,6 +278,44 @@ class CCEEPLDCollector:
             },
             "datasets": merged_datasets,
         }
+
+    def _fetch_pld_2026_dump_xml_records(self) -> List[Dict[str, Any]]:
+        """Baixa dump XML direto do recurso PLD e retorna registros do ano de 2026."""
+        try:
+            response = requests.get(self._pld_2026_dump_xml, timeout=120)
+            response.raise_for_status()
+            content = response.content
+            if not content:
+                return []
+
+            try:
+                df = pd.read_xml(BytesIO(content), xpath="//record")
+            except Exception:
+                df = pd.read_xml(BytesIO(content))
+
+            if df is None or df.empty:
+                return []
+
+            cols_map = {str(c).strip().upper(): str(c) for c in df.columns}
+            keep = {}
+            for target in ["MES_REFERENCIA", "DIA", "HORA", "PLD_HORA", "SUBMERCADO"]:
+                src = cols_map.get(target)
+                if src is not None:
+                    keep[target] = df[src]
+
+            if not keep:
+                return []
+
+            out = pd.DataFrame(keep)
+            if "MES_REFERENCIA" in out.columns:
+                out = out[out["MES_REFERENCIA"].astype(str).str.startswith("2026")]
+            if out.empty:
+                return []
+
+            return out.to_dict(orient="records")
+        except Exception as e:
+            logger.warning(f"CCEE: Falha ao obter dump XML PLD 2026: {e}")
+            return []
 
     def collect_open_data_csv(self, limit: int = 500) -> Dict[str, Dict[str, Any]]:
         """Coleta datasets adicionais via links CSV (open data)."""

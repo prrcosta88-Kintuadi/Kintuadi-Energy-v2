@@ -185,6 +185,30 @@ class ONSCollectorV2:
             ))
 
         # ============================
+        # CMO SEMI-HORÁRIO (2020 → atual)
+        # ============================
+        cmo_years = self._generate_year_range(2020)
+        for year in cmo_years:
+            dynamic.append((
+                f"CMO_{year}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/cmo_tm/"
+                f"CMO_SEMIHORARIO_{year}.xlsx"
+            ))
+
+        # ============================
+        # INTERCÂMBIO NACIONAL HORÁRIO (2000 → atual)
+        # ============================
+        intercambio_years = self._generate_year_range(2000)
+        for year in intercambio_years:
+            dynamic.append((
+                f"Intercambio_Nacional_{year}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/intercambio_nacional_ho/"
+                f"INTERCAMBIO_NACIONAL_{year}.xlsx"
+            ))
+
+        # ============================
         # CURVA DE CARGA (2018 → atual) - XLSX
         # ============================
         curva_carga_years = self._generate_year_range(2018)
