@@ -4,13 +4,80 @@ import pandas as pd
 from datetime import datetime, timedelta, date
 import logging
 from typing import List, Dict, Optional, Any
-from .data_models import PLDData, DataMetadata
-from .audit_logger import AuditLogger
+from io import StringIO
+import os
+import glob
+try:
+    from .data_models import PLDData, DataMetadata
+except Exception:
+    from dataclasses import dataclass
+
+    @dataclass
+    class DataMetadata:
+        source: str
+        collection_time: str
+        status: str
+        records_processed: int = 0
+        error_message: str = ""
+
+        def to_dict(self):
+            return {
+                "source": self.source,
+                "collection_time": self.collection_time,
+                "status": self.status,
+                "records_processed": self.records_processed,
+                "error_message": self.error_message,
+            }
+
+    @dataclass
+    class PLDData:
+        data: str
+        submercado: str
+        pld_valor: float
+        hora: int = 0
+        mes_referencia: int = 0
+        periodo_comercializacao: int = 0
+
+        def to_dict(self):
+            return {
+                "data": self.data,
+                "submercado": self.submercado,
+                "pld": self.pld_valor,
+                "pld_hora": self.pld_valor,
+                "hora": self.hora,
+                "mes_referencia": self.mes_referencia,
+                "periodo_comercializacao": self.periodo_comercializacao,
+            }
+
+try:
+    from .audit_logger import AuditLogger
+except Exception:
+    class AuditLogger:
+        def save_raw_data(self, *args, **kwargs):
+            return None
+        def log_data_transformation(self, *args, **kwargs):
+            return None
+        def log_consolidation(self, *args, **kwargs):
+            return None
+        def log_api_call(self, *args, **kwargs):
+            return None
+        def log_anomaly(self, *args, **kwargs):
+            return None
 
 logger = logging.getLogger(__name__)
 
 class CCEEPLDCollector:
     """Coletor otimizado de dados PLD da CCEE com auditoria"""
+
+    CKAN_BASE_URL = "https://dadosabertos.ccee.org.br/api/3/action/datastore_search"
+    PLD_HISTORICAL_RESOURCES = {
+        "2021": "51922462-16b4-4c64-8327-4e14d6ee8c6c",
+        "2022": "723cf7e6-6c29-4da6-aa39-e4c8804baf65",
+        "2023": "5fc317af-7191-4f8a-94e7-f77c56c747b3",
+        "2024": "1b5b6946-8036-4622-a7a3-b21f33fc52b7",
+        "2025": "2a180a6b-f092-43eb-9f82-a48798b803dc",
+        "2026": "3f279d6b-1069-42f7-9b0a-217b084729c4",
+    }
     
     def __init__(self, cache_ttl_minutes: int = 60, enable_audit: bool = True):
         self.base_url = "https://dadosabertos.ccee.org.br/api/3/action"
@@ -133,6 +200,80 @@ class CCEEPLDCollector:
             datasets[name] = self._fetch_dataset(resource_id, limit=limit)
         return datasets
 
+
+    def collect_pld_historical(self) -> Dict[str, Any]:
+        """Coleta PLD histórico anual por resource_id CKAN dedicado."""
+        datasets: List[Dict[str, Any]] = []
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        try:
+            for year, resource_id in self.PLD_HISTORICAL_RESOURCES.items():
+                logger.info(f"CCEE | Coletando PLD histórico {year}")
+                records = self._fetch_open_dataset(
+                    dataset_name=f"pld_{year}",
+                    resource_id=resource_id,
+                    limit=32000,
+                )
+                if not records:
+                    continue
+
+                df = pd.DataFrame(records)
+                out_path = os.path.join("data", f"ccee_pld_{year}_{now_str}.csv")
+                try:
+                    os.makedirs("data", exist_ok=True)
+                    df.to_csv(out_path, index=False)
+                    logger.info(f"CCEE: PLD anual salvo para {year}: {out_path} ({len(df)} linhas)")
+                    datasets.append({"year": int(year), "file": out_path})
+                except Exception as e:
+                    logger.warning(f"CCEE: Falha ao salvar CSV anual {year}: {e}")
+                    datasets.append({"year": int(year), "records": df.to_dict(orient="records")})
+
+            if datasets:
+                return {
+                    "metadata": {
+                        "source": "CCEE_PLD",
+                        "status": "success",
+                        "datasets_collected": len(datasets),
+                        "collection_time": datetime.now().isoformat(),
+                    },
+                    "datasets": sorted(datasets, key=lambda d: int(d.get("year", 0))),
+                }
+
+            # fallback local
+            files = sorted(glob.glob(os.path.join("data", "ccee_pld_*.csv")))
+            for f in files:
+                base = os.path.basename(f)
+                parts = base.split("_")
+                year = None
+                for part in parts:
+                    if part.isdigit() and len(part) == 4:
+                        year = int(part)
+                        break
+                if year is not None:
+                    datasets.append({"year": year, "file": f})
+
+            status = "success" if datasets else "error"
+            return {
+                "metadata": {
+                    "source": "CCEE_PLD",
+                    "status": status,
+                    "datasets_collected": len(datasets),
+                    "collection_time": datetime.now().isoformat(),
+                },
+                "datasets": sorted(datasets, key=lambda d: int(d.get("year", 0))),
+            }
+        except Exception as e:
+            logger.error(f"Erro na coleta PLD histórico: {e}", exc_info=True)
+            return {
+                "metadata": {
+                    "source": "CCEE_PLD",
+                    "status": "error",
+                    "error_message": str(e),
+                    "collection_time": datetime.now().isoformat(),
+                },
+                "datasets": [],
+            }
+
     def collect_open_data_csv(self, limit: int = 500) -> Dict[str, Dict[str, Any]]:
         """Coleta datasets adicionais via links CSV (open data)."""
         datasets = {}
@@ -196,85 +337,84 @@ class CCEEPLDCollector:
         }
     
     def _fetch_pld_data(self, days: int) -> List[Dict]:
-        """Busca dados da API com paginação e logging"""
-        all_records = []
+        """Busca PLD do resource_id corrente usando requests + paginação CKAN."""
+        try:
+            target_records = max(40000, int(days) * 24 * 4)
+        except Exception:
+            target_records = 40000
+
+        records = self._fetch_open_dataset(
+            dataset_name="pld_current",
+            resource_id=self.resource_id,
+            limit=32000,
+        )
+        if len(records) > target_records:
+            records = records[:target_records]
+
+        logger.info(f"CCEE: Total bruto coletado via CKAN/requests: {len(records)} registros (target={target_records})")
+        return records
+
+    def _fetch_open_dataset(
+        self,
+        dataset_name: str,
+        resource_id: str,
+        limit: int = 32000,
+    ) -> List[Dict[str, Any]]:
+        """Consulta dataset CKAN com paginação por offset."""
+        all_records: List[Dict[str, Any]] = []
         offset = 0
-        limit = 500
-        max_pages = 3
-        
-        for page in range(max_pages):
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json",
+        }
+
+        while True:
+            params = {
+                "resource_id": resource_id,
+                "limit": limit,
+                "offset": offset,
+            }
             try:
-                params = {
-                    "resource_id": self.resource_id,
-                    "limit": limit,
-                    "offset": offset,
-                    "sort": "_id desc"
-                }
-                
-                logger.debug(f"CCEE: Página {page + 1}, offset {offset}")
-                
                 response = requests.get(
-                    f"{self.base_url}/datastore_search",
+                    self.CKAN_BASE_URL,
                     params=params,
-                    timeout=30
+                    headers=headers,
+                    timeout=60,
                 )
                 response.raise_for_status()
-                
-                data = response.json()
-                
-                # Auditoria: Log da chamada API
-                if self.enable_audit and page == 0:  # Log apenas primeira página
-                    self.audit_logger.log_api_call(
-                        source="CCEE_PLD",
-                        url=f"{self.base_url}/datastore_search",
-                        params=params,
-                        response_status=response.status_code,
-                        data_sample=data.get('result', {}).get('records', [])[:2]
-                    )
-                
-                if not data.get("success", False):
-                    logger.warning(f"CCEE: API retornou success=False na página {page + 1}")
-                    break
-                
-                records = data["result"].get("records", [])
-                
-                if not records:
-                    logger.info(f"CCEE: Nenhum registro na página {page + 1}")
-                    break
-                
-                logger.info(f"CCEE: Página {page + 1}: {len(records)} registros")
-                
-                # Adiciona todos os registros
-                all_records.extend(records)
-                
-                # Log do primeiro registro
-                if page == 0 and records:
-                    first = records[0]
-                    logger.debug(f"Primeiro registro CCEE:")
-                    logger.debug(f"  MES_REFERENCIA: {first.get('MES_REFERENCIA')}")
-                    logger.debug(f"  DIA: {first.get('DIA')}")
-                    logger.debug(f"  HORA: {first.get('HORA')}")
-                    logger.debug(f"  PLD_HORA: {first.get('PLD_HORA')}")
-                    logger.debug(f"  SUBMERCADO: {first.get('SUBMERCADO')}")
-                
-                # Se temos dados suficientes, para
-                if len(all_records) >= 1000:
-                    logger.info(f"CCEE: Coletados {len(all_records)} registros (suficiente)")
-                    break
-                
-                # Se chegou ao fim
-                if len(records) < limit:
-                    break
-                
-                offset += limit
-                
+                payload = response.json()
             except Exception as e:
-                logger.error(f"CCEE: Erro na página {page + 1}: {e}")
+                logger.error(f"CCEE: Erro na consulta datastore_search ({dataset_name}): {e}")
                 break
-        
-        logger.info(f"CCEE: Total bruto coletado: {len(all_records)} registros")
+
+            if self.enable_audit and offset == 0:
+                self.audit_logger.log_api_call(
+                    source="CCEE_PLD",
+                    url=self.CKAN_BASE_URL,
+                    params=params,
+                    response_status=response.status_code,
+                    data_sample=(payload.get("result", {}).get("records", [])[:2] if isinstance(payload, dict) else []),
+                )
+
+            if not payload.get("success"):
+                logger.warning(f"CCEE: dataset {dataset_name} retornou success=False")
+                break
+
+            result = payload.get("result", {})
+            records = result.get("records", [])
+            if not records:
+                break
+
+            all_records.extend(records)
+            logger.info(f"CCEE | {dataset_name} | +{len(records)} registros (total: {len(all_records)})")
+
+            if len(records) < limit:
+                break
+            offset += limit
+
         return all_records
-    
+
     def _create_pld_objects(self, raw_data: List[Dict]) -> List[PLDData]:
         """Converte dados brutos para objetos PLD com validação"""
         pld_objects = []
