@@ -194,69 +194,8 @@ def _compute_hydrology_from_csv(ons: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =====================================================================
-# Energia Agora (ONS) — SÉRIES HORÁRIAS
+# Operação horária (fonte única: Open Data histórico)
 # =====================================================================
-
-def _extract_energia_agora(ons: Dict[str, Any]) -> Dict[str, Any]:
-    """Processa geração e carga horária direto do DuckDB (sem leitura CSV em memória)."""
-    geracao: Dict[str, Any] = {}
-    carga: Dict[str, Any] = {}
-
-    con = _duckdb_connect()
-    if con is None:
-        return {"generation": geracao, "load": carga, "status": "indisponível"}
-
-    try:
-        tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
-
-        for t in tables:
-            tl = str(t).lower()
-            info = con.execute(f"PRAGMA table_info('{t}')").fetchall()
-            cols = {c[1].lower(): c[1] for c in info}
-
-            if tl.startswith("geracao_") and "instante" in cols and "geracao" in cols:
-                df = con.execute(
-                    f"SELECT TRY_CAST({cols['instante']} AS TIMESTAMP) AS instante, "
-                    f"TRY_CAST({cols['geracao']} AS DOUBLE) AS geracao FROM {t}"
-                ).fetchdf()
-                df = df.dropna(subset=["instante", "geracao"]).sort_values("instante")
-                if df.empty:
-                    continue
-                fonte = tl.replace("geracao_", "")
-                v = df["geracao"]
-                geracao[fonte] = {
-                    "media": float(v.mean()),
-                    "max": float(v.max()),
-                    "min": float(v.min()),
-                    "rampa_max": float(v.diff().abs().max()),
-                    "serie": df[["instante", "geracao"]].to_dict("records"),
-                }
-
-            if tl.startswith("carga_") and "instante" in cols and "carga" in cols:
-                df = con.execute(
-                    f"SELECT TRY_CAST({cols['instante']} AS TIMESTAMP) AS instante, "
-                    f"TRY_CAST({cols['carga']} AS DOUBLE) AS carga FROM {t}"
-                ).fetchdf()
-                df = df.dropna(subset=["instante", "carga"]).sort_values("instante")
-                if df.empty:
-                    continue
-                area = tl.replace("carga_", "")
-                v = df["carga"]
-                carga[area] = {
-                    "media": float(v.mean()),
-                    "max": float(v.max()),
-                    "min": float(v.min()),
-                    "rampa_max": float(v.diff().abs().max()),
-                    "serie": df[["instante", "carga"]].to_dict("records"),
-                }
-    except Exception:
-        pass
-    finally:
-        con.close()
-
-    status = "disponível" if geracao or carga else "indisponível"
-    return {"generation": geracao, "load": carga, "status": status}
-
 
 def _normalize_power_to_mw(series: pd.Series) -> pd.Series:
     """
@@ -345,21 +284,6 @@ def _extract_open_data_historical_operation(ons: Dict[str, Any]) -> Dict[str, An
     return {"generation": generation, "load": load, "status": "disponível" if (generation or load) else "indisponível"}
 
 
-def _merge_operation_data(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
-    """Mescla dados de operação, priorizando séries mais longas do secondary."""
-    merged_gen = dict(primary.get("generation", {}))
-    merged_load = dict(primary.get("load", {}))
-
-    for k, v in secondary.get("generation", {}).items():
-        if k not in merged_gen or len(v.get("serie", [])) > len(merged_gen[k].get("serie", [])):
-            merged_gen[k] = v
-
-    for k, v in secondary.get("load", {}).items():
-        if k not in merged_load or len(v.get("serie", [])) > len(merged_load[k].get("serie", [])):
-            merged_load[k] = v
-
-    status = "disponível" if merged_gen or merged_load else "indisponível"
-    return {"generation": merged_gen, "load": merged_load, "status": status}
 
 # =====================================================================
 # CURTAILMENT RENOVÁVEL (ONS)
@@ -2932,13 +2856,10 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data", forc
     _core_log("HIDRO", "Hidrologia calculada", ear_medio=hydrology.get("ear_medio"), ena_media=hydrology.get("ena_media"))
 
     # ---------------- Operação ONS ----------------
-    # Energia Agora (intradiário) + Open Data histórico (séries longas)
-    _core_log("OPERACAO", "Extraindo operação Energia Agora")
-    operacao_agora = _extract_energia_agora(ons)
-    _core_log("OPERACAO", "Extraindo operação histórica Open Data")
-    operacao_historica = _extract_open_data_historical_operation(ons)
-    operacao = _merge_operation_data(operacao_agora, operacao_historica)
-    _core_log("OPERACAO", "Operação consolidada")
+    # Fonte única de geração/carga: Open Data histórico (geracao_usina_horaria + curva_carga)
+    _core_log("OPERACAO", "Extraindo operação histórica Open Data (fonte única)")
+    operacao = _extract_open_data_historical_operation(ons)
+    _core_log("OPERACAO", "Operação consolidada", status=operacao.get("status"))
 
     # ---------------- Preços (PLD horário CCEE) ----------------
     pld_medio = pld_std = pld_min = pld_max = None
@@ -3238,7 +3159,7 @@ def build_core_analysis(raw_data: Dict[str, Any], output_dir: str = "data", forc
         "alerts": alerts,
         "metadata": {
             "analysis_version": "core-6.0",  # Atualizada para v6 com correção conceitual
-            "sources": ["ONS (CSV + Energia Agora)", "CCEE"],
+            "sources": ["ONS (Open Data histórico)", "CCEE"],
             "limites_aneel_2025": True,
             "analise_termica_versao": "v5_dupla_perspectiva",
             "correcao_conceitual": True,  # Sinaliza que CVU alto vs PLD baixo = FOLGA
