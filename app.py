@@ -342,7 +342,7 @@ def main():
         "💰 Decomposição Econômica",
         "⚡ Curtailment & Restrições",
         "🧠 Coerência Operativa",
-        "🔋 Simulação BESS (Curtailment Shift)",
+        "🔋 Simulação BESS",
         "📊 Matriz Horária do SIN",
         "📘 Metodologia & Glossário",
     ])
