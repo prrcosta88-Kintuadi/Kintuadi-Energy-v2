@@ -1,6 +1,9 @@
 # scripts/ccee_collector_v2.py - COM AUDITORIA
 import requests
 import pandas as pd
+import json
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, date
 import logging
 from typing import List, Dict, Optional, Any
@@ -97,6 +100,7 @@ class CCEEPLDCollector:
             "sumario_distribuicao_mensal": "9e8e3f5f-58a8-4744-b6da-7309a4513fcb",
         }
         self._resource_show_url = f"{self.base_url}/resource_show"
+        self._pld_2026_dump_csv = "https://dadosabertos.ccee.org.br/datastore/dump/3f279d6b-1069-42f7-9b0a-217b084729c4?bom=True"
     
     def collect_pld_data(self, days: int = 7) -> Dict:
         """Coleta dados PLD com auditoria completa"""
