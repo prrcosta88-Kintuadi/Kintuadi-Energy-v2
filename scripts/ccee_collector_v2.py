@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, date
 import logging
 from typing import List, Dict, Optional, Any
 from io import StringIO
+import os
+import glob
 try:
     from .data_models import PLDData, DataMetadata
 except Exception:
@@ -191,16 +193,52 @@ class CCEEPLDCollector:
 
 
     def collect_pld_historical(self) -> Dict[str, Any]:
-        """Compatibilidade com pipeline integrado: retorna datasets anuais de PLD.
+        """Retorna datasets anuais de PLD a partir do dump CSV direto da CCEE.
 
-        Prioriza arquivos locais `data/ccee_pld_{ano}_*.csv`. Se não houver,
-        faz fallback para `collect_pld_data` e devolve datasets por ano em memória.
+        Fonte única: link direto de download CSV (sem paginação JSON/api datastore_search).
+        Também salva arquivos no padrão `data/ccee_pld_{ano}_*.csv`.
         """
-        import glob
-        import os
-
         datasets: List[Dict[str, Any]] = []
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+        df = self._download_pld_dump_csv_df()
+        if df is not None and not df.empty:
+            cols_map = {str(c).strip().upper(): str(c) for c in df.columns}
+            mes_col = cols_map.get("MES_REFERENCIA")
+            if mes_col:
+                years = pd.to_numeric(df[mes_col], errors="coerce").astype("Int64").astype(str).str[:4]
+                df = df.assign(_year=years)
+            else:
+                df = df.assign(_year=datetime.now().strftime("%Y"))
+
+            for year, g in df.groupby("_year"):
+                try:
+                    yi = int(str(year))
+                except Exception:
+                    continue
+                g = g.drop(columns=["_year"], errors="ignore")
+                out_path = os.path.join("data", f"ccee_pld_{yi}_{now_str}.csv")
+                try:
+                    os.makedirs("data", exist_ok=True)
+                    g.to_csv(out_path, index=False)
+                    logger.info(f"CCEE: Dump CSV salvo para {yi}: {out_path} ({len(g)} linhas)")
+                    datasets.append({"year": yi, "file": out_path})
+                except Exception as e:
+                    logger.warning(f"CCEE: Falha ao salvar CSV anual {yi}: {e}")
+                    datasets.append({"year": yi, "records": g.to_dict(orient="records")})
+
+        if datasets:
+            return {
+                "metadata": {
+                    "source": "CCEE_PLD",
+                    "status": "success",
+                    "datasets_collected": len(datasets),
+                    "collection_time": datetime.now().isoformat(),
+                },
+                "datasets": sorted(datasets, key=lambda d: int(d.get("year", 0))),
+            }
+
+        # fallback local: se download falhar, mantém operação com arquivos já existentes.
         files = sorted(glob.glob(os.path.join("data", "ccee_pld_*.csv")))
         for f in files:
             base = os.path.basename(f)
@@ -210,74 +248,38 @@ class CCEEPLDCollector:
                 if part.isdigit() and len(part) == 4:
                     year = int(part)
                     break
-            if year is None:
-                continue
-            datasets.append({"year": year, "file": f})
+            if year is not None:
+                datasets.append({"year": year, "file": f})
 
-        # Sempre tenta atualizar janela recente para evitar defasagem do ano corrente
-        # (ex.: arquivo local parou em uma data anterior, mas API já possui novos dias).
-        pld_data = self.collect_pld_data(days=120)
-        records = pld_data.get("data", []) if isinstance(pld_data, dict) else []
-        if not records and datasets:
-            return {
-                "metadata": {
-                    "source": "CCEE_PLD",
-                    "status": "success",
-                    "datasets_collected": len(datasets),
-                    "collection_time": datetime.now().isoformat(),
-                },
-                "datasets": datasets,
-            }
-
-        if not records:
-            return {
-                "metadata": {
-                    "source": "CCEE_PLD",
-                    "status": "error",
-                    "datasets_collected": 0,
-                    "collection_time": datetime.now().isoformat(),
-                },
-                "datasets": [],
-            }
-
-        df = pd.DataFrame(records)
-        if "mes_referencia" in df.columns:
-            df["year"] = pd.to_numeric(df["mes_referencia"], errors="coerce").astype("Int64").astype(str).str[:4]
-        elif "MES_REFERENCIA" in df.columns:
-            df["year"] = pd.to_numeric(df["MES_REFERENCIA"], errors="coerce").astype("Int64").astype(str).str[:4]
-        else:
-            df["year"] = datetime.now().strftime("%Y")
-
-        # mescla local + API, priorizando API para o ano corrente
-        datasets_by_year: Dict[int, Dict[str, Any]] = {}
-        for ds in datasets:
-            try:
-                datasets_by_year[int(ds.get("year"))] = ds
-            except Exception:
-                continue
-
-        for y, g in df.groupby("year"):
-            try:
-                yi = int(y)
-            except Exception:
-                continue
-            datasets_by_year[yi] = {"year": yi, "records": g.to_dict(orient="records")}
-
-        recs_2026 = self._fetch_pld_2026_dump_csv_records()
-        if recs_2026:
-            datasets_by_year[2026] = {"year": 2026, "records": recs_2026}
-
-        merged_datasets = [datasets_by_year[k] for k in sorted(datasets_by_year.keys())]
-
+        status = "success" if datasets else "error"
         return {
             "metadata": {
                 "source": "CCEE_PLD",
-                "status": "success",
-                "datasets_collected": len(merged_datasets),
+                "status": status,
+                "datasets_collected": len(datasets),
                 "collection_time": datetime.now().isoformat(),
             },
-            "datasets": merged_datasets,
+            "datasets": sorted(datasets, key=lambda d: int(d.get("year", 0))),
         }
+
+    def _download_pld_dump_csv_df(self) -> pd.DataFrame:
+        """Baixa o dump CSV direto do PLD e retorna DataFrame bruto."""
+        try:
+            logger.info("CCEE: Baixando PLD via dump CSV direto...")
+            response = requests.get(self._pld_2026_dump_csv, timeout=180)
+            response.raise_for_status()
+            if not response.text:
+                return pd.DataFrame()
+            df = pd.read_csv(
+                StringIO(response.text),
+                sep=None,
+                engine="python",
+                low_memory=False,
+            )
+            return df if df is not None else pd.DataFrame()
+        except Exception as e:
+            logger.error(f"CCEE: Falha no download do dump CSV PLD: {e}")
+            return pd.DataFrame()
 
     def _fetch_pld_2026_dump_csv_records(self) -> List[Dict[str, Any]]:
         """Baixa dump CSV direto do recurso PLD e retorna registros do ano de 2026."""
@@ -382,85 +384,44 @@ class CCEEPLDCollector:
         }
     
     def _fetch_pld_data(self, days: int) -> List[Dict]:
-        """Busca dados da API com paginação e logging"""
-        all_records = []
-        offset = 0
-        limit = 500
-        max_pages = 3
-        
-        for page in range(max_pages):
+        """Busca PLD a partir do dump CSV direto (sem API datastore_search)."""
+        df = self._download_pld_dump_csv_df()
+        if df is None or df.empty:
+            logger.info("CCEE: Total bruto coletado: 0 registros")
+            return []
+
+        cols_map = {str(c).strip().upper(): str(c) for c in df.columns}
+        # Mantém somente colunas usadas no processamento atual
+        selected = {}
+        for c in ["MES_REFERENCIA", "DIA", "HORA", "PLD_HORA", "SUBMERCADO", "_ID"]:
+            src = cols_map.get(c)
+            if src:
+                selected[c] = df[src]
+        if not selected:
+            logger.warning("CCEE: Dump CSV sem colunas esperadas de PLD")
+            return []
+
+        out = pd.DataFrame(selected)
+
+        # filtro opcional da janela recente
+        if days and {"MES_REFERENCIA", "DIA"}.issubset(out.columns):
             try:
-                params = {
-                    "resource_id": self.resource_id,
-                    "limit": limit,
-                    "offset": offset,
-                    "sort": "_id desc"
-                }
-                
-                logger.debug(f"CCEE: Página {page + 1}, offset {offset}")
-                
-                response = requests.get(
-                    f"{self.base_url}/datastore_search",
-                    params=params,
-                    timeout=30
+                out["MES_REFERENCIA"] = out["MES_REFERENCIA"].astype(str).str.zfill(6)
+                out["DIA"] = pd.to_numeric(out["DIA"], errors="coerce").astype("Int64")
+                out["_DATA"] = pd.to_datetime(
+                    out["MES_REFERENCIA"].str[:4] + "-" + out["MES_REFERENCIA"].str[4:6] + "-" + out["DIA"].astype(str),
+                    errors="coerce",
                 )
-                response.raise_for_status()
-                
-                data = response.json()
-                
-                # Auditoria: Log da chamada API
-                if self.enable_audit and page == 0:  # Log apenas primeira página
-                    self.audit_logger.log_api_call(
-                        source="CCEE_PLD",
-                        url=f"{self.base_url}/datastore_search",
-                        params=params,
-                        response_status=response.status_code,
-                        data_sample=data.get('result', {}).get('records', [])[:2]
-                    )
-                
-                if not data.get("success", False):
-                    logger.warning(f"CCEE: API retornou success=False na página {page + 1}")
-                    break
-                
-                records = data["result"].get("records", [])
-                
-                if not records:
-                    logger.info(f"CCEE: Nenhum registro na página {page + 1}")
-                    break
-                
-                logger.info(f"CCEE: Página {page + 1}: {len(records)} registros")
-                
-                # Adiciona todos os registros
-                all_records.extend(records)
-                
-                # Log do primeiro registro
-                if page == 0 and records:
-                    first = records[0]
-                    logger.debug(f"Primeiro registro CCEE:")
-                    logger.debug(f"  MES_REFERENCIA: {first.get('MES_REFERENCIA')}")
-                    logger.debug(f"  DIA: {first.get('DIA')}")
-                    logger.debug(f"  HORA: {first.get('HORA')}")
-                    logger.debug(f"  PLD_HORA: {first.get('PLD_HORA')}")
-                    logger.debug(f"  SUBMERCADO: {first.get('SUBMERCADO')}")
-                
-                # Se temos dados suficientes, para
-                if len(all_records) >= 1000:
-                    logger.info(f"CCEE: Coletados {len(all_records)} registros (suficiente)")
-                    break
-                
-                # Se chegou ao fim
-                if len(records) < limit:
-                    break
-                
-                offset += limit
-                
-            except Exception as e:
-                logger.error(f"CCEE: Erro na página {page + 1}: {e}")
-                break
-        
-        logger.info(f"CCEE: Total bruto coletado: {len(all_records)} registros")
-        return all_records
-    
+                cutoff = pd.Timestamp(datetime.now().date() - timedelta(days=max(int(days), 1)))
+                out = out[out["_DATA"] >= cutoff]
+                out = out.drop(columns=["_DATA"], errors="ignore")
+            except Exception:
+                pass
+
+        records = out.to_dict(orient="records")
+        logger.info(f"CCEE: Total bruto coletado (dump CSV): {len(records)} registros")
+        return records
+
     def _create_pld_objects(self, raw_data: List[Dict]) -> List[PLDData]:
         """Converte dados brutos para objetos PLD com validação"""
         pld_objects = []
