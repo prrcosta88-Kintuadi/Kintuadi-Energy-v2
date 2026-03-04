@@ -6,9 +6,7 @@ import logging
 import csv
 import io
 import os
-import tempfile
 import requests
-from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 
@@ -84,10 +82,10 @@ CARGA_AGORA_ENDPOINTS = [
 
 class ONSCollectorV2:
 
+    # OpenData ONS prioriza XLSX para evitar inconsistências de separador decimal em CSV.
     OPEN_DATASETS: List[Tuple[str, str]] = [
-        ("Reservatorios", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/reservatorio/RESERVATORIOS.csv"),
-        ("Capacidade_Instalada", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/capacidade-geracao/CAPACIDADE_GERACAO.csv"),
-        ("Despacho_GFOM_2021", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/hist_despacho_energia/info2021.csv"),
+        ("Reservatorios", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/reservatorio/RESERVATORIOS.xlsx"),
+        ("Capacidade_Instalada", "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset/capacidade-geracao/CAPACIDADE_GERACAO.xlsx"),
     ]
 
     def __init__(
@@ -147,28 +145,28 @@ class ONSCollectorV2:
                 f"EAR_Diario_Reservatorios_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/ear_reservatorio_di/"
-                f"EAR_DIARIO_RESERVATORIOS_{year}.csv"
+                f"EAR_DIARIO_RESERVATORIOS_{year}.xlsx"
             ))
 
             dynamic.append((
                 f"ENA_Diario_Reservatorios_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/ena_reservatorio_di/"
-                f"ENA_DIARIO_RESERVATORIOS_{year}.csv"
+                f"ENA_DIARIO_RESERVATORIOS_{year}.xlsx"
             ))
 
             dynamic.append((
                 f"EAR_Diario_Subsistema_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/ear_subsistema_di/"
-                f"EAR_DIARIO_SUBSISTEMA_{year}.csv"
+                f"EAR_DIARIO_SUBSISTEMA_{year}.xlsx"
             ))
 
             dynamic.append((
                 f"ENA_Diario_Subsistema_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/ena_subsistema_di/"
-                f"ENA_DIARIO_SUBSISTEMA_{year}.csv"
+                f"ENA_DIARIO_SUBSISTEMA_{year}.xlsx"
             ))
 
         # ============================
@@ -183,7 +181,65 @@ class ONSCollectorV2:
                 f"CVU_Usina_Termica_{year}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/cvu_usitermica_se/"
-                f"CVU_USINA_TERMICA_{year}.csv"
+                f"CVU_USINA_TERMICA_{year}.xlsx"
+            ))
+
+        # ============================
+        # CMO SEMI-HORÁRIO (2020 → atual)
+        # ============================
+        cmo_years = self._generate_year_range(2020)
+        for year in cmo_years:
+            dynamic.append((
+                f"CMO_{year}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/cmo_tm/"
+                f"CMO_SEMIHORARIO_{year}.xlsx"
+            ))
+
+        # ============================
+        # INTERCÂMBIO NACIONAL HORÁRIO (2000 → atual)
+        # ============================
+        intercambio_years = self._generate_year_range(2000)
+        for year in intercambio_years:
+            dynamic.append((
+                f"Intercambio_Nacional_{year}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/intercambio_nacional_ho/"
+                f"INTERCAMBIO_NACIONAL_{year}.xlsx"
+            ))
+
+        # ============================
+        # CURVA DE CARGA (2018 → atual) - XLSX
+        # ============================
+        curva_carga_years = self._generate_year_range(2018)
+        for year in curva_carga_years:
+            dynamic.append((
+                f"Curva_Carga_{year}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/curva-carga-ho/"
+                f"CURVA_CARGA_{year}.xlsx"
+            ))
+
+        # ============================
+        # GERAÇÃO POR USINA HORÁRIA (2018-2021)
+        # ============================
+        for year in range(2018, 2022):
+            dynamic.append((
+                f"Geracao_Usina_Horaria_{year}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/geracao_usina_2_ho/"
+                f"GERACAO_USINA-2_{year}.xlsx"
+            ))
+
+        # ============================
+        # DESPACHO GFOM ANUAL (2013-2021)
+        # ============================
+        for year in range(2013, 2022):
+            dynamic.append((
+                f"Despacho_GFOM_{year}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/geracao_termica_despacho_2_ho/"
+                f"GERACAO_TERMICA_DESPACHO_{year}.xlsx"
             ))
 
         return dynamic
@@ -194,6 +250,7 @@ class ONSCollectorV2:
         dynamic = []
 
         months = self._generate_month_range("2021-10")
+        months_disponibilidade = self._generate_month_range("2015-01")
 
         for m in months:
             year, month = m.split("-")
@@ -203,31 +260,45 @@ class ONSCollectorV2:
                 f"Despacho_GFOM_{m}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
                 f"dataset/geracao_termica_despacho_2_ho/"
-                f"GERACAO_TERMICA_DESPACHO-2_{year}_{month}.csv"
+                f"GERACAO_TERMICA_DESPACHO-2_{year}_{month}.xlsx"
             ))
 
-            # Disponibilidade
-            dynamic.append((
-                f"Disponibilidade_Usina_{m}",
-                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
-                f"dataset/disponibilidade_usina_ho/"
-                f"DISPONIBILIDADE_USINA_{year}_{month}.csv"
-            ))
-
-            # Restrição FV
-            dynamic.append((
-                f"Restricao_fotovoltaica_{m}",
-                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
-                f"dataset/restricao_coff_fotovoltaica_detail_tm/"
-                f"RESTRICAO_COFF_FOTOVOLTAICA_DETAIL_{year}_{month}.csv"
-            ))
+            # Restrição FV (disponível desde 2024-04)
+            if m >= "2024-04":
+                dynamic.append((
+                    f"Restricao_fotovoltaica_{m}",
+                    f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                    f"dataset/restricao_coff_fotovoltaica_tm/"
+                    f"RESTRICAO_COFF_FOTOVOLTAICA_{year}_{month}.xlsx"
+                ))
 
             # Restrição Eólica
             dynamic.append((
                 f"Restricao_eolica_{m}",
                 f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
-                f"dataset/restricao_coff_eolica_detail_tm/"
-                f"RESTRICAO_COFF_EOLICA_DETAIL_{year}_{month}.csv"
+                f"dataset/restricao_coff_eolica_tm/"
+                f"RESTRICAO_COFF_EOLICA_{year}_{month}.xlsx"
+            ))
+
+        # Disponibilidade (histórico desde 2015-01)
+        for m in months_disponibilidade:
+            year, month = m.split("-")
+            dynamic.append((
+                f"Disponibilidade_Usina_{m}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/disponibilidade_usina_ho/"
+                f"DISPONIBILIDADE_USINA_{year}_{month}.xlsx"
+            ))
+
+        # Geração por usina (mensal: 2022-01 → atual)
+        months_geracao_usina = self._generate_month_range("2022-01")
+        for m in months_geracao_usina:
+            year, month = m.split("-")
+            dynamic.append((
+                f"Geracao_Usina_Horaria_{m}",
+                f"https://ons-aws-prod-opendata.s3.amazonaws.com/"
+                f"dataset/geracao_usina_2_ho/"
+                f"GERACAO_USINA-2_{year}_{month}.xlsx"
             ))
 
         return dynamic
@@ -251,9 +322,9 @@ class ONSCollectorV2:
         path = os.path.join("data", "ons", year)
         os.makedirs(path, exist_ok=True)
 
-        file_path = os.path.join(path, f"{dataset_name}.csv")
-
-        return not os.path.exists(file_path)
+        csv_path = os.path.join(path, f"{dataset_name}.csv")
+        xlsx_path = os.path.join(path, f"{dataset_name}.xlsx")
+        return not (os.path.exists(csv_path) or os.path.exists(xlsx_path))
 
     
     def collect_open_data(self) -> Dict[str, Any]:
@@ -261,33 +332,19 @@ class ONSCollectorV2:
         datasets = []
 
         for name, url in self.OPEN_DATASETS:
-
-            path, rows = self._fetch_and_save_csv(url, name)
-            
-            if not path:
-                continue
-
-            datasets.append({
-                "dataset": name,
-                "type": "csv",
-                "records": rows,
-                "file": path,
-                "origin": "open_data",
-            })
-
             try:
                 logger.info(f"ONS | OpenData | {name}")
-
-                path, rows = self._fetch_and_save_csv(url, name)
+                path, rows = self._fetch_and_save_open_data(url, name)
+                if not path:
+                    continue
 
                 datasets.append({
                     "dataset": name,
-                    "type": "csv",
+                    "type": "xlsx" if str(path).lower().endswith(".xlsx") else "csv",
                     "records": rows,
                     "file": path,
                     "origin": "open_data",
                 })
-
             except Exception as e:
                 logger.warning(f"Falha {name}: {e}")
 
@@ -303,32 +360,13 @@ class ONSCollectorV2:
         }
 
 
-
-    # ==================================================================
-    # API pública
-    # ==================================================================
-
-        # ---------- API ENERGIA AGORA ----------
-        
-        datasets.extend(self._collect_api_series())
-
-        return {
-            "metadata": {
-                "source": "ONS",
-                "status": "success",
-                "datasets_collected": len(datasets),
-                "collection_time": start_time.isoformat(),
-            },
-            "datasets": datasets,
-        }
-
     # ==================================================================
     # Open Data helpers
     # ==================================================================
 
 
     
-    def _fetch_and_save_csv(self, url: str, dataset_name: str) -> Tuple[Optional[str], int]:
+    def _fetch_and_save_open_data(self, url: str, dataset_name: str) -> Tuple[Optional[str], int]:
 
         try:
             year = dataset_name.split("_")[-1].split("-")[0]
@@ -338,7 +376,8 @@ class ONSCollectorV2:
         path = os.path.join("data", "ons", year)
         os.makedirs(path, exist_ok=True)
 
-        file_path = os.path.join(path, f"{dataset_name}.csv")
+        ext = ".xlsx" if url.lower().endswith(".xlsx") else ".csv"
+        file_path = os.path.join(path, f"{dataset_name}{ext}")
 
         # -----------------------------
         # Se já existe localmente
@@ -354,8 +393,27 @@ class ONSCollectorV2:
             response = requests.get(url, timeout=OPEN_DATA_TIMEOUT)
 
             if response.status_code == 404:
-                logger.info(f"{dataset_name} não disponível (404).")
-                return None, 0
+                alt_url = None
+                if url.lower().endswith('.xlsx'):
+                    alt_url = url[:-5] + '.csv'
+                elif url.lower().endswith('.csv'):
+                    alt_url = url[:-4] + '.xlsx'
+                if alt_url:
+                    try:
+                        alt_resp = requests.get(alt_url, timeout=OPEN_DATA_TIMEOUT)
+                        if alt_resp.status_code == 200:
+                            response = alt_resp
+                            url = alt_url
+                            logger.info(f"{dataset_name} fallback para {alt_url}")
+                        else:
+                            logger.info(f"{dataset_name} não disponível (404).")
+                            return None, 0
+                    except requests.RequestException:
+                        logger.info(f"{dataset_name} não disponível (404).")
+                        return None, 0
+                else:
+                    logger.info(f"{dataset_name} não disponível (404).")
+                    return None, 0
 
             if response.status_code == 403:
                 logger.warning(f"{dataset_name} acesso negado (403).")
@@ -373,7 +431,13 @@ class ONSCollectorV2:
         with open(file_path, "wb") as f:
             f.write(response.content)
 
-        rows = self._count_csv_rows(response.content)
+        final_ext = ".xlsx" if (url.lower().endswith(".xlsx")) else ".csv"
+        if final_ext != ext:
+            # ajusta nome salvo caso fallback troque extensão
+            file_path = os.path.join(path, f"{dataset_name}{final_ext}")
+            with open(file_path, "wb") as f:
+                f.write(response.content)
+        rows = self._count_csv_rows(response.content) if final_ext == ".csv" else 0
 
         return file_path, rows
 
