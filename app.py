@@ -249,14 +249,14 @@ def main():
         <style>
           .stApp { background-color:#0b0f14; color:#f3f4f6; }
           [data-testid="stSidebar"] { display:none !important; }
-          .block-container { padding-top: 210px; }
+          .block-container { padding-top: 170px; }
           .fixed-header { position: fixed; top: 0; left:0; right:0; z-index:999; background:#0b0f14; }
           .full-bleed-line { height:1px; background:#c8a44d; width:100vw; margin-left:calc(50% - 50vw); }
           .header-layer { background:#0f172a; padding:0.65rem 1rem; }
-          .tabs-layer { background: linear-gradient(180deg, #0b1222 0%, #070d1a 100%); padding:0.35rem 0.8rem 0.05rem 0.8rem; }
+          .tabs-layer { background: linear-gradient(180deg, #0b1222 0%, #070d1a 100%); padding:0.25rem 0.4rem 0.05rem 0.4rem; }
           label { color:#ffffff !important; font-weight:700 !important; }
-          .stTabs [data-baseweb="tab-list"] { gap: 0.4rem; }
-          .stTabs [data-baseweb="tab"] { color:#e5e7eb; border-radius:6px; padding:0.35rem 0.65rem; }
+          .stTabs [data-baseweb="tab-list"] { gap: 0.15rem; flex-wrap: nowrap !important; overflow-x: auto !important; scrollbar-width: thin; }
+          .stTabs [data-baseweb="tab"] { color:#e5e7eb; border-radius:6px; padding:0.25rem 0.45rem; font-size:0.78rem; white-space:nowrap; }
           .stTabs [aria-selected="true"] { background:#152238 !important; color:#f8fafc !important; border:1px solid #c8a44d !important; }
           div[data-testid="stFormSubmitButton"] > button {
             background:#d4af37 !important; color:#111827 !important; font-weight:800 !important; border:1px solid #b38f2b !important;
@@ -295,7 +295,7 @@ def main():
     with colc2:
         logo = _prepare_logo(Path("streamlit/img/emblema_maatria.png"))
         if logo and logo.exists():
-            st.image(str(logo), width="stretch")
+            st.image(str(logo), width=420)
         else:
             st.markdown("## MAÁTria Energia")
 
@@ -303,15 +303,17 @@ def main():
     st.markdown("<div class='header-layer'>", unsafe_allow_html=True)
 
     analyze_clicked = False
-    with st.form("period_form", clear_on_submit=False):
-        c1, c2, c3 = st.columns([1.2, 1.2, 0.7])
-        with c1:
-            dt_start = st.date_input("DE", value=st.session_state["date_start"], min_value=min_d, max_value=max_d)
-        with c2:
-            dt_end = st.date_input("ATÉ", value=st.session_state["date_end"], min_value=min_d, max_value=max_d)
-        with c3:
-            st.markdown("<div style='height:1.65rem;'></div>", unsafe_allow_html=True)
-            analyze_clicked = st.form_submit_button("ANALISAR", use_container_width=True)
+    form_col, _ = st.columns([0.4, 0.6])
+    with form_col:
+        with st.form("period_form", clear_on_submit=False):
+            c1, c2, c3 = st.columns([1.05, 1.05, 0.8])
+            with c1:
+                dt_start = st.date_input("DE", value=st.session_state["date_start"], min_value=min_d, max_value=max_d)
+            with c2:
+                dt_end = st.date_input("ATÉ", value=st.session_state["date_end"], min_value=min_d, max_value=max_d)
+            with c3:
+                st.markdown("<div style='height:1.65rem;'></div>", unsafe_allow_html=True)
+                analyze_clicked = st.form_submit_button("ANALISAR", use_container_width=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("<div class='full-bleed-line'></div>", unsafe_allow_html=True)
@@ -356,17 +358,26 @@ def main():
     current = dff.mean(numeric_only=True)
     current_state = dff["system_state"].dropna().iloc[-1] if "system_state" in dff.columns and not dff["system_state"].dropna().empty else "-"
 
+    # Totais do período selecionado (soma hora a hora)
+    total_sin_cost = pd.to_numeric(dff.get("sin_cost", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
+    total_prud = pd.to_numeric(dff.get("t_prudencia", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
+    total_agua = pd.to_numeric(dff.get("t_hidro", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
+    total_curt_loss = pd.to_numeric(dff.get("curtailment_loss", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
+    total_gfom = pd.to_numeric(dff.get("gfom_pct", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
+    total_isr = pd.to_numeric(dff.get("isr", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
+    total_ipr = pd.to_numeric(dff.get("ipr", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
+
     kpis = [
         ("PLD médio", f"R$ {_fmt_ptbr(current.get('pld', np.nan),2)}", "#22c55e"),
         ("CMO dominante", f"R$ {_fmt_ptbr(current.get('cmo_dominante', np.nan),2)}", "#3b82f6"),
-        ("Custo Total SIN", _fmt_money_compact(current.get("sin_cost", np.nan)), "#f59e0b"),
-        ("Custo Prudência", _fmt_money_compact(current.get("t_prudencia", np.nan)), "#ef4444"),
-        ("Valor Água", _fmt_money_compact(current.get("t_hidro", np.nan)), "#14b8a6"),
+        ("Custo Total SIN", _fmt_money_compact(total_sin_cost), "#f59e0b"),
+        ("Custo Prudência", _fmt_money_compact(total_prud), "#ef4444"),
+        ("Valor Água", _fmt_money_compact(total_agua), "#14b8a6"),
         ("Curtailment", f"{_fmt_ptbr(current.get('curtail_total', np.nan),2)} MWmed", "#a78bfa"),
-        ("Energia Curtailada", f"R$ {_fmt_ptbr(current.get('curtailment_loss', np.nan),2)}", "#eab308"),
-        ("GFOM", f"{_fmt_ptbr(current.get('gfom_pct', np.nan),2)} %", "#38bdf8"),
-        ("ISR", _fmt_ptbr(current.get("isr", np.nan),2), "#f97316"),
-        ("IPR", _fmt_ptbr(current.get("ipr", np.nan),2), "#84cc16"),
+        ("Valor (R$) Curtailment", _fmt_money_compact(total_curt_loss), "#eab308"),
+        ("GFOM", _fmt_ptbr(total_gfom,2), "#38bdf8"),
+        ("ISR", _fmt_ptbr(total_isr,2), "#f97316"),
+        ("IPR", _fmt_ptbr(total_ipr,2), "#84cc16"),
         ("Risk Gap", _fmt_ptbr(current.get("risk_gap", np.nan),2), "#fb7185"),
         ("CVaR Implícito", f"R$ {_fmt_ptbr(current.get('cvar_implicit', np.nan),2)}", "#60a5fa"),
     ]
