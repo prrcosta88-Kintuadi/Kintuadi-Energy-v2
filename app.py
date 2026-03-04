@@ -285,10 +285,9 @@ def main():
         <style>
           .stApp { background-color:#0b0f14; color:#f3f4f6; }
           [data-testid="stSidebar"] { display:none !important; }
-          .block-container { padding-top: 170px; }
+          .block-container { padding-top: 40px; }
           .fixed-header { position: fixed; top: 0; left:0; right:0; z-index:999; background:#0b0f14; }
           .full-bleed-line { height:1px; background:#c8a44d; width:100vw; margin-left:calc(50% - 50vw); }
-          .header-layer { background:#0f172a; padding:0.65rem 1rem; }
           .tabs-layer { background: linear-gradient(180deg, #0b1222 0%, #070d1a 100%); padding:0.25rem 0.4rem 0.05rem 0.4rem; }
           label { color:#ffffff !important; font-weight:700 !important; }
           .stTabs [data-baseweb="tab-list"] { gap: 0.15rem; flex-wrap: nowrap !important; overflow-x: auto !important; scrollbar-width: thin; }
@@ -331,7 +330,7 @@ def main():
     with colc2:
         logo = _prepare_logo(Path("streamlit/img/emblema_maatria.png"))
         if logo and logo.exists():
-            st.image(str(logo), width=210)
+            st.image(str(logo), width=300)
         else:
             st.markdown("## MAÁTria Energia")
 
@@ -360,7 +359,7 @@ def main():
         "💰 Decomposição Econômica",
         "⚡ Curtailment & Restrições",
         "🧠 Coerência Operativa",
-        "🔋 Simulação BESS (Curtailment Shift)",
+        "🔋 Simulação BESS",
         "📊 Matriz Horária do SIN",
         "📘 Metodologia & Glossário",
     ])
