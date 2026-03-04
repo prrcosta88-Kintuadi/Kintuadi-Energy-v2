@@ -166,72 +166,107 @@ def _build_hourly_df(core: Dict[str, Any]) -> pd.DataFrame:
     return df
 
 
-def _kpi_card(label: str, value: Any, suffix: str = ""):
-    st.markdown(f"""
-    <div style='background:#131722;border:1px solid #2a2f3a;border-radius:12px;padding:10px 12px;height:95px;'>
-      <div style='font-size:12px;color:#9ba3af;'>{label}</div>
-      <div style='font-size:24px;color:#f3f4f6;font-weight:700;line-height:1.2'>{value}{suffix}</div>
-    </div>
-    """, unsafe_allow_html=True)
+def _fmt_ptbr(value: Any, decimals: int = 2) -> str:
+    try:
+        if value is None or pd.isna(value):
+            return "-"
+        s = f"{float(value):,.{decimals}f}"
+        return s.replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return "-"
+
+
+def _fmt_money_compact(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    v = float(value)
+    av = abs(v)
+    if av >= 1_000_000:
+        return f"R$ {_fmt_ptbr(v/1_000_000, 2)} MM"
+    if av >= 1_000:
+        return f"R$ {_fmt_ptbr(v/1_000, 2)} k"
+    return f"R$ {_fmt_ptbr(v, 2)}"
+
+
+def _prepare_logo(path: Path) -> Optional[Path]:
+    """Recorta bordas escuras do PNG para reduzir fundo/preenchimento visual."""
+    if not path.exists():
+        return None
+    try:
+        from PIL import Image
+
+        img = Image.open(path).convert("RGBA")
+        arr = np.array(img)
+        # pixels não quase-pretos e não transparentes
+        mask = (arr[:, :, 3] > 5) & ((arr[:, :, 0] > 20) | (arr[:, :, 1] > 20) | (arr[:, :, 2] > 20))
+        if not mask.any():
+            return path
+        ys, xs = np.where(mask)
+        x0, x1 = xs.min(), xs.max()
+        y0, y1 = ys.min(), ys.max()
+        cropped = img.crop((max(0, x0 - 4), max(0, y0 - 4), min(img.width, x1 + 5), min(img.height, y1 + 5)))
+        out = Path("data") / "emblema_maatria_trimmed.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cropped.save(out)
+        return out
+    except Exception:
+        return path
+
+
+def _kpi_card(label: str, value: str, border_color: str):
+    st.markdown(
+        f"""
+        <div style='background:#131722;border:1px solid #2a2f3a;border-top:3px solid {border_color};
+                    border-radius:12px;padding:10px 12px;height:95px;'>
+          <div style='font-size:12px;color:#9ba3af;'>{label}</div>
+          <div style='font-size:23px;color:#f3f4f6;font-weight:700;line-height:1.2'>{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _system_text(row: pd.Series) -> str:
     s = row.get("system_state")
     if isinstance(s, str) and s:
-        return f"Regime {s} com carga líquida de {row.get('net_load', np.nan):,.0f} MWmed."
+        return f"Regime {s} com carga líquida de {_fmt_ptbr(row.get('net_load', np.nan), 0)} MWmed."
     return "Sem dados suficientes para diagnóstico automático da hora selecionada."
 
 
+def _plot_df(dff: pd.DataFrame) -> pd.DataFrame:
+    out = dff.copy().reset_index()
+    first_col = out.columns[0]
+    if first_col != "instante":
+        out = out.rename(columns={first_col: "instante"})
+    return out
+
+
 def main():
-    st.set_page_config(page_title="MAÁTria Energia", layout="wide")
+    st.set_page_config(page_title="MAÁTria Energia", layout="wide", initial_sidebar_state="collapsed")
 
-    st.markdown("""
-    <style>
-      .stApp { background-color:#0b0f14; color:#f3f4f6; }
-      [data-testid="stSidebar"] { background-color:#0f172a; }
-      .block-container { padding-top: 0.5rem; }
-
-      .header-line { border-top:1px solid #c8a44d; margin: 0.25rem 0; }
-      .header-layer {
-        background:#0f172a;
-        border-top:1px solid #c8a44d;
-        border-bottom:1px solid #c8a44d;
-        border-radius:8px;
-        padding:0.75rem 1rem;
-        margin:0.35rem 0 0.55rem 0;
-      }
-      .tabs-layer {
-        background: linear-gradient(180deg, #0b1222 0%, #070d1a 100%);
-        border-top:1px solid #c8a44d;
-        border-bottom:1px solid #c8a44d;
-        border-radius:8px;
-        padding:0.4rem 0.6rem 0.1rem 0.6rem;
-        margin-bottom:0.75rem;
-      }
-      .stTabs [data-baseweb="tab-list"] { gap: 0.4rem; }
-      .stTabs [data-baseweb="tab"] {
-        background: transparent;
-        color:#e5e7eb;
-        border-radius:6px;
-        padding: 0.35rem 0.65rem;
-      }
-      .stTabs [aria-selected="true"] {
-        background:#152238 !important;
-        color:#f8fafc !important;
-        border:1px solid #c8a44d !important;
-      }
-      div[data-testid="stFormSubmitButton"] > button {
-        background:#d4af37 !important;
-        color:#111827 !important;
-        font-weight:800 !important;
-        border:1px solid #b38f2b !important;
-      }
-      div[data-testid="stFormSubmitButton"] > button:hover {
-        background:#e3bf4c !important;
-        color:#000 !important;
-      }
-    </style>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <style>
+          .stApp { background-color:#0b0f14; color:#f3f4f6; }
+          [data-testid="stSidebar"] { display:none !important; }
+          .block-container { padding-top: 210px; }
+          .fixed-header { position: fixed; top: 0; left:0; right:0; z-index:999; background:#0b0f14; }
+          .full-bleed-line { height:1px; background:#c8a44d; width:100vw; margin-left:calc(50% - 50vw); }
+          .header-layer { background:#0f172a; padding:0.65rem 1rem; }
+          .tabs-layer { background: linear-gradient(180deg, #0b1222 0%, #070d1a 100%); padding:0.35rem 0.8rem 0.05rem 0.8rem; }
+          label { color:#ffffff !important; font-weight:700 !important; }
+          .stTabs [data-baseweb="tab-list"] { gap: 0.4rem; }
+          .stTabs [data-baseweb="tab"] { color:#e5e7eb; border-radius:6px; padding:0.35rem 0.65rem; }
+          .stTabs [aria-selected="true"] { background:#152238 !important; color:#f8fafc !important; border:1px solid #c8a44d !important; }
+          div[data-testid="stFormSubmitButton"] > button {
+            background:#d4af37 !important; color:#111827 !important; font-weight:800 !important; border:1px solid #b38f2b !important;
+          }
+          div[data-testid="stFormSubmitButton"] > button:hover { background:#e3bf4c !important; color:#000 !important; }
+          .cards-row { margin-bottom: 10px; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     core = _load_core()
     if not core:
@@ -244,63 +279,44 @@ def main():
         return
 
     min_d, max_d = df.index.min().date(), df.index.max().date()
+    default_day = date.today() - pd.Timedelta(days=1)
+    if default_day < min_d or default_day > max_d:
+        default_day = max_d
 
-    st.markdown("<div class='header-line'></div>", unsafe_allow_html=True)
+    if "date_start" not in st.session_state:
+        st.session_state["date_start"] = default_day
+    if "date_end" not in st.session_state:
+        st.session_state["date_end"] = default_day
+
+    st.markdown("<div class='fixed-header'>", unsafe_allow_html=True)
+    st.markdown("<div class='full-bleed-line'></div>", unsafe_allow_html=True)
+
     colc1, colc2, colc3 = st.columns([1, 2, 1])
     with colc2:
-        logo = Path("streamlit/img/emblema_maatria.png")
-        if logo.exists():
-            st.image(str(logo), width='stretch')
+        logo = _prepare_logo(Path("streamlit/img/emblema_maatria.png"))
+        if logo and logo.exists():
+            st.image(str(logo), width="stretch")
         else:
             st.markdown("## MAÁTria Energia")
-    st.markdown("<div class='header-line'></div>", unsafe_allow_html=True)
 
-    with st.container():
-        st.markdown("<div class='header-layer'>", unsafe_allow_html=True)
-        with st.form("period_form", clear_on_submit=False):
-            c1, c2, c3 = st.columns([1.2, 1.2, 0.7])
-            if "date_start" not in st.session_state:
-                st.session_state["date_start"] = min_d
-            if "date_end" not in st.session_state:
-                st.session_state["date_end"] = max_d
-            with c1:
-                dt_start = st.date_input("DE", value=st.session_state["date_start"], min_value=min_d, max_value=max_d)
-            with c2:
-                dt_end = st.date_input("ATÉ", value=st.session_state["date_end"], min_value=min_d, max_value=max_d)
-            with c3:
-                st.markdown("<div style='height:1.65rem;'></div>", unsafe_allow_html=True)
-                analyze_clicked = st.form_submit_button("ANALISAR", use_container_width=True)
+    st.markdown("<div class='full-bleed-line'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='header-layer'>", unsafe_allow_html=True)
 
-        st.markdown("</div>", unsafe_allow_html=True)
+    analyze_clicked = False
+    with st.form("period_form", clear_on_submit=False):
+        c1, c2, c3 = st.columns([1.2, 1.2, 0.7])
+        with c1:
+            dt_start = st.date_input("DE", value=st.session_state["date_start"], min_value=min_d, max_value=max_d)
+        with c2:
+            dt_end = st.date_input("ATÉ", value=st.session_state["date_end"], min_value=min_d, max_value=max_d)
+        with c3:
+            st.markdown("<div style='height:1.65rem;'></div>", unsafe_allow_html=True)
+            analyze_clicked = st.form_submit_button("ANALISAR", use_container_width=True)
 
-    if analyze_clicked:
-        if dt_start > dt_end:
-            st.error("Período inválido: DE deve ser menor ou igual a ATÉ.")
-        else:
-            st.session_state["date_start"] = dt_start
-            st.session_state["date_end"] = dt_end
-
-    selected_start = st.session_state.get("date_start", min_d)
-    selected_end = st.session_state.get("date_end", max_d)
-
-    dff = df[(df.index.date >= selected_start) & (df.index.date <= selected_end)].copy()
-    if dff.empty:
-        st.warning("Não há dados para o período selecionado.")
-        return
-
-    current = dff.mean(numeric_only=True)
-    if "system_state" in dff.columns and not dff["system_state"].dropna().empty:
-        current_state = dff["system_state"].dropna().iloc[-1]
-    else:
-        current_state = "-"
-
-    st.sidebar.header("Filtros")
-    subsystem = st.sidebar.selectbox("Submercado", ["SIN", "SUDESTE", "SUL", "NORDESTE", "NORTE"], index=0)
-    source = st.sidebar.multiselect("Fontes", ["hydro", "thermal", "nuclear", "solar", "wind"], default=["hydro", "thermal", "nuclear", "solar", "wind"])
-    norm_toggle = st.sidebar.toggle("Exibir normalizados", value=True)
-    sim_shift = st.sidebar.slider("BESS shift solar curtailed (%)", 0, 100, 0)
-
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<div class='full-bleed-line'></div>", unsafe_allow_html=True)
     st.markdown("<div class='tabs-layer'>", unsafe_allow_html=True)
+
     tabs = st.tabs([
         "📸 Fotografia Operativa",
         "💰 Decomposição Econômica",
@@ -310,61 +326,101 @@ def main():
         "📊 Matriz Horária do SIN",
         "📘 Metodologia & Glossário",
     ])
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<div class='full-bleed-line'></div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # KPI cards abaixo das abas
-    cols = st.columns(6)
+    if analyze_clicked:
+        if dt_start > dt_end:
+            st.error("Período inválido: DE deve ser menor ou igual a ATÉ.")
+        else:
+            st.session_state["date_start"] = dt_start
+            st.session_state["date_end"] = dt_end
+
+    selected_start = st.session_state.get("date_start", default_day)
+    selected_end = st.session_state.get("date_end", default_day)
+
+    dff = df[(df.index.date >= selected_start) & (df.index.date <= selected_end)].copy()
+    if dff.empty:
+        st.warning("Não há dados para o período selecionado.")
+        return
+
+    photo_day = min(max_d, date.today() - pd.Timedelta(days=1))
+    if photo_day < selected_start or photo_day > selected_end:
+        photo_day = selected_end
+    dff_photo = dff[dff.index.date == photo_day].copy()
+    if dff_photo.empty:
+        dff_photo = dff.copy()
+
+    current = dff.mean(numeric_only=True)
+    current_state = dff["system_state"].dropna().iloc[-1] if "system_state" in dff.columns and not dff["system_state"].dropna().empty else "-"
+
     kpis = [
-        ("PLD médio", current.get("pld", np.nan), " R$/MWh"),
-        ("CMO dominante", current.get("cmo_dominante", np.nan), " R$/MWh"),
-        ("Custo Total SIN", current.get("sin_cost", np.nan), " R$/h"),
-        ("Custo Prudência", current.get("t_prudencia", np.nan), " R$/h"),
-        ("Valor Água", current.get("t_hidro", np.nan), " R$/h"),
-        ("Curtailment", current.get("curtail_total", np.nan), " MWmed"),
-        ("Energia Curtailada", current.get("curtailment_loss", np.nan), " R$/h"),
-        ("GFOM", current.get("gfom_pct", np.nan), " %"),
-        ("ISR", current.get("isr", np.nan), ""),
-        ("IPR", current.get("ipr", np.nan), ""),
-        ("Risk Gap", current.get("risk_gap", np.nan), ""),
-        ("CVaR Implícito", current.get("cvar_implicit", np.nan), " R$/MWh"),
+        ("PLD médio", f"R$ {_fmt_ptbr(current.get('pld', np.nan),2)}", "#22c55e"),
+        ("CMO dominante", f"R$ {_fmt_ptbr(current.get('cmo_dominante', np.nan),2)}", "#3b82f6"),
+        ("Custo Total SIN", _fmt_money_compact(current.get("sin_cost", np.nan)), "#f59e0b"),
+        ("Custo Prudência", _fmt_money_compact(current.get("t_prudencia", np.nan)), "#ef4444"),
+        ("Valor Água", _fmt_money_compact(current.get("t_hidro", np.nan)), "#14b8a6"),
+        ("Curtailment", f"{_fmt_ptbr(current.get('curtail_total', np.nan),2)} MWmed", "#a78bfa"),
+        ("Energia Curtailada", f"R$ {_fmt_ptbr(current.get('curtailment_loss', np.nan),2)}", "#eab308"),
+        ("GFOM", f"{_fmt_ptbr(current.get('gfom_pct', np.nan),2)} %", "#38bdf8"),
+        ("ISR", _fmt_ptbr(current.get("isr", np.nan),2), "#f97316"),
+        ("IPR", _fmt_ptbr(current.get("ipr", np.nan),2), "#84cc16"),
+        ("Risk Gap", _fmt_ptbr(current.get("risk_gap", np.nan),2), "#fb7185"),
+        ("CVaR Implícito", f"R$ {_fmt_ptbr(current.get('cvar_implicit', np.nan),2)}", "#60a5fa"),
     ]
-    for i, (lab, val, suf) in enumerate(kpis):
-        with cols[i % 6]:
-            _kpi_card(lab, "-" if pd.isna(val) else f"{val:,.2f}", suf)
+
+    for base in (0, 6):
+        cols = st.columns(6)
+        for i in range(6):
+            idx = base + i
+            if idx < len(kpis):
+                lab, val, color = kpis[idx]
+                with cols[i]:
+                    _kpi_card(lab, val, color)
+        st.markdown("<div class='cards-row'></div>", unsafe_allow_html=True)
+
     st.info(f"Estado Operativo do SIN: **{current_state}** | Período: **{selected_start}** até **{selected_end}**")
 
     with tabs[0]:
+        st.caption(f"Fotografia operativa do dia **{photo_day}** (D-1 por padrão).")
         st.write(_system_text(current))
         fig = go.Figure()
-        for src in [s for s in ["hydro", "thermal", "nuclear", "solar", "wind"] if s in dff.columns and s in source]:
-            fig.add_bar(x=dff.index, y=dff[src], name=src)
-        if "load" in dff.columns:
-            fig.add_scatter(x=dff.index, y=dff["load"], name="load", mode="lines")
-        if "net_load" in dff.columns:
-            fig.add_scatter(x=dff.index, y=dff["net_load"], name="net_load", mode="lines")
+        labels = {
+            "hydro": "Hidro", "thermal": "Térmica", "nuclear": "Nuclear", "solar": "Solar", "wind": "Eólica"
+        }
+        for src in ["hydro", "thermal", "nuclear", "solar", "wind"]:
+            if src in dff_photo.columns:
+                fig.add_bar(x=dff_photo.index, y=dff_photo[src], name=labels[src])
+        if "load" in dff_photo.columns:
+            fig.add_scatter(x=dff_photo.index, y=dff_photo["load"], name="Carga", mode="lines")
+        if "net_load" in dff_photo.columns:
+            fig.add_scatter(x=dff_photo.index, y=dff_photo["net_load"], name="Carga Líquida", mode="lines")
         fig.update_layout(template="plotly_dark", barmode="stack", height=420)
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, width="stretch")
 
     with tabs[1]:
-        decomp_cols = [c for c in ["t_hidro", "t_eletric", "t_prudencia"] if c in dff.columns]
+        pdf = _plot_df(dff)
+        decomp_cols = [c for c in ["t_hidro", "t_eletric", "t_prudencia"] if c in pdf.columns]
         if decomp_cols:
-            fig = px.area(dff.reset_index(), x="index", y=decomp_cols, template="plotly_dark")
-            st.plotly_chart(fig, width='stretch')
-        if "t_prudencia" in dff.columns and "sin_cost" in dff.columns:
-            prud_share = (dff["t_prudencia"] / dff["sin_cost"].replace(0, np.nan) * 100)
-            st.line_chart(prud_share)
+            fig = px.bar(pdf, x="instante", y=decomp_cols, template="plotly_dark", barmode="stack")
+            fig.update_layout(title="Decomposição horária empilhada (R$/h)")
+            st.plotly_chart(fig, width="stretch")
+
+        if {"thermal", "thermal_prudential_dispatch"}.issubset(dff.columns):
+            g2 = _plot_df(dff[["thermal", "thermal_prudential_dispatch"]])
+            fig2 = px.line(g2, x="instante", y=["thermal", "thermal_prudential_dispatch"], template="plotly_dark")
+            fig2.update_layout(title="Despacho térmico total vs despacho prudencial (MWmed)")
+            st.plotly_chart(fig2, width="stretch")
+            st.caption("A segunda curva mostra a parcela térmica associada à prudência operativa.")
 
     with tabs[2]:
-        if "curtail_total" in dff.columns:
-            st.plotly_chart(
-                px.bar(
-                    dff.reset_index(),
-                    x="index",
-                    y=[c for c in ["curtail_solar", "curtail_wind", "curtail_total"] if c in dff.columns],
-                    template="plotly_dark",
-                ),
-                width='stretch',
-            )
+        cdf = _plot_df(dff)
+        cols = [c for c in ["curtail_solar", "curtail_wind", "curtail_total"] if c in cdf.columns]
+        if cols:
+            fig = px.bar(cdf, x="instante", y=cols, template="plotly_dark", barmode="group")
+            st.plotly_chart(fig, width="stretch")
         st.caption("Distribuição por tipo de restrição disponível no painel horário do core quando fornecido pelo ONS.")
 
     with tabs[3]:
@@ -376,7 +432,7 @@ def main():
             "Load pressure": np.nan,
         }
         norm = ((core.get("economic") or {}).get("normalization_hourly") or {})
-        if norm_toggle and norm and not dff.empty:
+        if norm and not dff.empty:
             tkey = dff.index[-1].strftime("%Y-%m-%d %H:%M:%S")
             metrics["EAR_norm"] = (norm.get("EAR_norm") or {}).get(tkey, np.nan)
             metrics["ENA_norm"] = (norm.get("ENA_norm") or {}).get(tkey, np.nan)
@@ -389,6 +445,7 @@ def main():
         st.json(metrics)
 
     with tabs[4]:
+        sim_shift = st.slider("Percentual de deslocamento do curtailment solar para 19h–23h", 0, 100, 0)
         sim = dff.copy()
         if not sim.empty and "curtail_solar" in sim.columns:
             frac = sim_shift / 100.0
@@ -404,50 +461,26 @@ def main():
                 thermal_after = thermal_before - thermal_reduction
                 hydro_after = hydro_before - hydro_reduction
                 pld_proxy_after = sim.get("pld", pd.Series(np.nan, index=sim.index)) * (1 - 0.15 * (thermal_reduction / thermal_before.replace(0, np.nan)).fillna(0))
-                out = pd.DataFrame(
-                    {
-                        "SIN cost before": sim.get("sin_cost", pd.Series(np.nan, index=sim.index)),
-                        "SIN cost after": sim.get("load", pd.Series(np.nan, index=sim.index)) * pld_proxy_after,
-                        "thermal before": thermal_before,
-                        "thermal after": thermal_after,
-                        "hydro before": hydro_before,
-                        "hydro after": hydro_after,
-                    }
-                )
-                st.plotly_chart(px.line(out.reset_index(), x="index", y=out.columns, template="plotly_dark"), width='stretch')
+                out = pd.DataFrame({
+                    "SIN cost before": sim.get("sin_cost", pd.Series(np.nan, index=sim.index)),
+                    "SIN cost after": sim.get("load", pd.Series(np.nan, index=sim.index)) * pld_proxy_after,
+                    "thermal before": thermal_before,
+                    "thermal after": thermal_after,
+                    "hydro before": hydro_before,
+                    "hydro after": hydro_after,
+                })
+                op = _plot_df(out)
+                st.plotly_chart(px.line(op, x="instante", y=[c for c in op.columns if c != "instante"], template="plotly_dark"), width="stretch")
 
     with tabs[5]:
         matrix_cols = [
-            c
-            for c in [
-                "pld",
-                "cmo_dominante",
-                "load",
-                "net_load",
-                "hydro",
-                "thermal",
-                "nuclear",
-                "solar",
-                "wind",
-                "gfom_pct",
-                "curtail_total",
-                "ear",
-                "ena",
-                "risk_gap",
-                "system_state",
-            ]
-            if c in dff.columns
+            c for c in ["pld","cmo_dominante","load","net_load","hydro","thermal","nuclear","solar","wind","gfom_pct","curtail_total","ear","ena","risk_gap","system_state"] if c in dff.columns
         ]
         m = dff[matrix_cols].copy()
         if not m.empty:
             m["interpretacao"] = m.apply(_system_text, axis=1)
-            st.dataframe(m, width='stretch', height=420)
-            st.download_button(
-                "Exportar CSV",
-                data=m.reset_index().to_csv(index=False).encode("utf-8"),
-                file_name="matriz_horaria_sin.csv",
-                mime="text/csv",
-            )
+            st.dataframe(m, width="stretch", height=420)
+            st.download_button("Exportar CSV", data=m.reset_index().to_csv(index=False).encode("utf-8"), file_name="matriz_horaria_sin.csv", mime="text/csv")
 
     with tabs[6]:
         with st.expander("Decomposição T_total"):
