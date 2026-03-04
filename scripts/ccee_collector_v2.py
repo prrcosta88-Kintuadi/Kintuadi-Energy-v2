@@ -328,48 +328,77 @@ class CCEEPLDCollector:
         }
     
     def _fetch_pld_data(self, days: int) -> List[Dict]:
-        """Busca PLD via API CKAN usando urllib (método recomendado pela CCEE)."""
+        """Busca PLD via API CKAN usando urllib (formato recomendado pela CCEE)."""
         all_records: List[Dict[str, Any]] = []
+
         try:
-            limit = max(40000, int(days) * 24 * 4)
+            target_records = max(40000, int(days) * 24 * 4)
         except Exception:
-            limit = 40000
+            target_records = 40000
 
-        params = {
-            "resource_id": self.resource_id,
-            "limit": limit,
-            "offset": 0,
-            "sort": "_id desc",
-        }
-        query = urllib.parse.urlencode(params)
-        url = f"{self.base_url}/datastore_search?{query}"
+        # O endpoint da CCEE/CKAN retorna no máximo 32000 por chamada (mesmo com limit maior).
+        page_limit = 32000
+        offset = 0
 
-        try:
-            # Bypass de proxy do ambiente para seguir o exemplo oficial com urllib
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with opener.open(req, timeout=120) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+        while len(all_records) < target_records:
+            params = {
+                "resource_id": self.resource_id,
+                "limit": page_limit,
+                "offset": offset,
+            }
+            query = urllib.parse.urlencode(params)
+            url = f"{self.base_url}/datastore_search?{query}"
 
-            if self.enable_audit:
-                self.audit_logger.log_api_call(
-                    source="CCEE_PLD",
-                    url=f"{self.base_url}/datastore_search",
-                    params=params,
-                    response_status=200,
-                    data_sample=(payload.get("result", {}).get("records", [])[:2] if isinstance(payload, dict) else []),
+            try:
+                # Segue o padrão do exemplo oficial (urllib/request).
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "application/json",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+
+                if self.enable_audit and offset == 0:
+                    self.audit_logger.log_api_call(
+                        source="CCEE_PLD",
+                        url=f"{self.base_url}/datastore_search",
+                        params=params,
+                        response_status=200,
+                        data_sample=(payload.get("result", {}).get("records", [])[:2] if isinstance(payload, dict) else []),
+                    )
+
+                if not isinstance(payload, dict) or not payload.get("success", False):
+                    logger.warning("CCEE: datastore_search retornou success=False")
+                    break
+
+                page_records = payload.get("result", {}).get("records", []) or []
+                if not page_records:
+                    break
+
+                all_records.extend(page_records)
+                logger.info(
+                    f"CCEE: datastore_search página offset={offset} retornou {len(page_records)} registros"
                 )
 
-            if not isinstance(payload, dict) or not payload.get("success", False):
-                logger.warning("CCEE: datastore_search retornou success=False")
-                return []
+                # Próxima página
+                if len(page_records) < page_limit:
+                    break
+                offset += page_limit
 
-            all_records = payload.get("result", {}).get("records", []) or []
-        except Exception as e:
-            logger.error(f"CCEE: Erro na consulta datastore_search (urllib): {e}")
-            return []
+            except Exception as e:
+                logger.error(f"CCEE: Erro na consulta datastore_search (urllib): {e}")
+                break
 
-        logger.info(f"CCEE: Total bruto coletado via CKAN/urllib: {len(all_records)} registros (limit={limit})")
+        if len(all_records) > target_records:
+            all_records = all_records[:target_records]
+
+        logger.info(
+            f"CCEE: Total bruto coletado via CKAN/urllib: {len(all_records)} registros "
+            f"(target={target_records}, limit_pagina={page_limit})"
+        )
         return all_records
 
     def _create_pld_objects(self, raw_data: List[Dict]) -> List[PLDData]:
