@@ -193,24 +193,24 @@ class CCEEPLDCollector:
 
 
     def collect_pld_historical(self) -> Dict[str, Any]:
-        """Retorna datasets anuais de PLD a partir do dump CSV direto da CCEE.
-
-        Fonte única: link direto de download CSV (sem paginação JSON/api datastore_search).
-        Também salva arquivos no padrão `data/ccee_pld_{ano}_*.csv`.
-        """
+        """Retorna datasets anuais de PLD via API CKAN (datastore_search)."""
         datasets: List[Dict[str, Any]] = []
         now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        df = self._download_pld_dump_csv_df()
-        if df is not None and not df.empty:
-            cols_map = {str(c).strip().upper(): str(c) for c in df.columns}
-            mes_col = cols_map.get("MES_REFERENCIA")
-            if mes_col:
-                years = pd.to_numeric(df[mes_col], errors="coerce").astype("Int64").astype(str).str[:4]
-                df = df.assign(_year=years)
-            else:
-                df = df.assign(_year=datetime.now().strftime("%Y"))
+        pld_data = self.collect_pld_data(days=400)
+        records = pld_data.get("data", []) if isinstance(pld_data, dict) else []
 
+        if records:
+            df = pd.DataFrame(records)
+            year_series = None
+            if "mes_referencia" in df.columns:
+                year_series = pd.to_numeric(df["mes_referencia"], errors="coerce").astype("Int64").astype(str).str[:4]
+            elif "MES_REFERENCIA" in df.columns:
+                year_series = pd.to_numeric(df["MES_REFERENCIA"], errors="coerce").astype("Int64").astype(str).str[:4]
+            if year_series is None:
+                year_series = pd.Series([datetime.now().strftime("%Y")] * len(df))
+
+            df = df.assign(_year=year_series)
             for year, g in df.groupby("_year"):
                 try:
                     yi = int(str(year))
@@ -221,7 +221,7 @@ class CCEEPLDCollector:
                 try:
                     os.makedirs("data", exist_ok=True)
                     g.to_csv(out_path, index=False)
-                    logger.info(f"CCEE: Dump CSV salvo para {yi}: {out_path} ({len(g)} linhas)")
+                    logger.info(f"CCEE: PLD anual salvo para {yi}: {out_path} ({len(g)} linhas)")
                     datasets.append({"year": yi, "file": out_path})
                 except Exception as e:
                     logger.warning(f"CCEE: Falha ao salvar CSV anual {yi}: {e}")
@@ -238,7 +238,7 @@ class CCEEPLDCollector:
                 "datasets": sorted(datasets, key=lambda d: int(d.get("year", 0))),
             }
 
-        # fallback local: se download falhar, mantém operação com arquivos já existentes.
+        # fallback local: mantém operação com arquivos já existentes.
         files = sorted(glob.glob(os.path.join("data", "ccee_pld_*.csv")))
         for f in files:
             base = os.path.basename(f)
@@ -263,23 +263,9 @@ class CCEEPLDCollector:
         }
 
     def _download_pld_dump_csv_df(self) -> pd.DataFrame:
-        """Baixa o dump CSV direto do PLD e retorna DataFrame bruto."""
-        try:
-            logger.info("CCEE: Baixando PLD via dump CSV direto...")
-            response = requests.get(self._pld_2026_dump_csv, timeout=180)
-            response.raise_for_status()
-            if not response.text:
-                return pd.DataFrame()
-            df = pd.read_csv(
-                StringIO(response.text),
-                sep=None,
-                engine="python",
-                low_memory=False,
-            )
-            return df if df is not None else pd.DataFrame()
-        except Exception as e:
-            logger.error(f"CCEE: Falha no download do dump CSV PLD: {e}")
-            return pd.DataFrame()
+        """Compat helper: usa API CKAN e retorna DataFrame de PLD."""
+        records = self._fetch_pld_data(days=400)
+        return pd.DataFrame(records) if records else pd.DataFrame()
 
     def _fetch_pld_2026_dump_csv_records(self) -> List[Dict[str, Any]]:
         """Baixa dump CSV direto do recurso PLD e retorna registros do ano de 2026."""
@@ -384,43 +370,45 @@ class CCEEPLDCollector:
         }
     
     def _fetch_pld_data(self, days: int) -> List[Dict]:
-        """Busca PLD a partir do dump CSV direto (sem API datastore_search)."""
-        df = self._download_pld_dump_csv_df()
-        if df is None or df.empty:
-            logger.info("CCEE: Total bruto coletado: 0 registros")
-            return []
+        """Busca PLD na API CKAN datastore_search (sem download direto protegido)."""
+        all_records: List[Dict[str, Any]] = []
+        try:
+            limit = max(40000, int(days) * 24 * 4)
+        except Exception:
+            limit = 40000
 
-        cols_map = {str(c).strip().upper(): str(c) for c in df.columns}
-        # Mantém somente colunas usadas no processamento atual
-        selected = {}
-        for c in ["MES_REFERENCIA", "DIA", "HORA", "PLD_HORA", "SUBMERCADO", "_ID"]:
-            src = cols_map.get(c)
-            if src:
-                selected[c] = df[src]
-        if not selected:
-            logger.warning("CCEE: Dump CSV sem colunas esperadas de PLD")
-            return []
+        params = {
+            "resource_id": self.resource_id,
+            "limit": limit,
+            "offset": 0,
+            "sort": "_id desc",
+        }
 
-        out = pd.DataFrame(selected)
+        try:
+            response = requests.get(f"{self.base_url}/datastore_search", params=params, timeout=120)
+            response.raise_for_status()
+            payload = response.json()
 
-        # filtro opcional da janela recente
-        if days and {"MES_REFERENCIA", "DIA"}.issubset(out.columns):
-            try:
-                out["MES_REFERENCIA"] = out["MES_REFERENCIA"].astype(str).str.zfill(6)
-                out["DIA"] = pd.to_numeric(out["DIA"], errors="coerce").astype("Int64")
-                out["_DATA"] = pd.to_datetime(
-                    out["MES_REFERENCIA"].str[:4] + "-" + out["MES_REFERENCIA"].str[4:6] + "-" + out["DIA"].astype(str),
-                    errors="coerce",
+            if self.enable_audit:
+                self.audit_logger.log_api_call(
+                    source="CCEE_PLD",
+                    url=f"{self.base_url}/datastore_search",
+                    params=params,
+                    response_status=response.status_code,
+                    data_sample=(payload.get("result", {}).get("records", [])[:2] if isinstance(payload, dict) else []),
                 )
-                cutoff = pd.Timestamp(datetime.now().date() - timedelta(days=max(int(days), 1)))
-                out = out[out["_DATA"] >= cutoff]
-                out = out.drop(columns=["_DATA"], errors="ignore")
-            except Exception:
-                pass
 
-        records = out.to_dict(orient="records")
-        logger.info(f"CCEE: Total bruto coletado (dump CSV): {len(records)} registros")
-        return records
+            if not isinstance(payload, dict) or not payload.get("success", False):
+                logger.warning("CCEE: datastore_search retornou success=False")
+                return []
+
+            all_records = payload.get("result", {}).get("records", []) or []
+        except Exception as e:
+            logger.error(f"CCEE: Erro na consulta datastore_search: {e}")
+            return []
+
+        logger.info(f"CCEE: Total bruto coletado via CKAN: {len(all_records)} registros (limit={limit})")
+        return all_records
 
     def _create_pld_objects(self, raw_data: List[Dict]) -> List[PLDData]:
         """Converte dados brutos para objetos PLD com validação"""
