@@ -8,6 +8,9 @@ import os
 import sys
 import subprocess
 import logging
+import json
+import shutil
+from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -76,12 +79,12 @@ def print_banner():
     """
     print(banner)
 
-def run_collector_v2():
+def run_collector_v2(persist_mode: str = "full"):
     """Executa o coletor v2.0"""
     try:
         from scripts.integrated_collector_v2 import KintuadiIntegratedCollectorV2
         collector = KintuadiIntegratedCollectorV2()
-        return collector.quick_collect()
+        return collector.quick_collect(persist_mode=persist_mode)
     except ImportError as e:
         logger.error(f"Erro ao importar coletor v2: {e}")
         return None
@@ -105,6 +108,85 @@ def run_dashboard():
     except Exception as e:
         print(f"❌ Erro inesperado: {e}")
 
+
+
+def load_latest_raw_data():
+    latest_file = Path("data") / "kintuadi_latest.json"
+    if not latest_file.exists():
+        return None
+    try:
+        with latest_file.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Falha ao ler {latest_file}: {e}")
+        return None
+
+
+def run_core_analysis():
+    try:
+        from scripts.core_analysis import build_core_analysis
+    except Exception as e:
+        logger.error(f"Erro ao importar core_analysis: {e}")
+        return None
+
+    raw = load_latest_raw_data()
+    if not raw:
+        logger.error("kintuadi_latest.json indisponível para gerar core.")
+        return None
+
+    try:
+        core = build_core_analysis(raw, output_dir="data")
+        return core
+    except Exception as e:
+        logger.error(f"Falha ao gerar core_analysis_latest.json: {e}")
+        return None
+
+
+def publish_core_to_github(push: bool = True):
+    src = Path("data") / "core_analysis_latest.json"
+    dst = Path("core_analysis_latest.json")
+    if not src.exists():
+        logger.error("core_analysis_latest.json não encontrado em data/.")
+        return False
+
+    shutil.copy2(src, dst)
+
+    try:
+        subprocess.run(["git", "add", "core_analysis_latest.json"], check=True)
+        diff = subprocess.run(["git", "diff", "--cached", "--quiet"])
+        if diff.returncode == 0:
+            logger.info("Sem alterações no core_analysis_latest.json para commit.")
+            return True
+
+        msg = f"Atualiza core_analysis_latest.json [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
+        subprocess.run(["git", "commit", "-m", msg], check=True)
+        logger.info("Commit do core realizado com sucesso.")
+
+        if push:
+            try:
+                subprocess.run(["git", "push"], check=True)
+                logger.info("Push para GitHub realizado com sucesso.")
+            except Exception as e:
+                logger.warning(f"Commit feito, mas push falhou: {e}")
+        return True
+    except Exception as e:
+        logger.error(f"Falha ao commitar core no git: {e}")
+        return False
+
+
+def run_pipeline_and_publish(push: bool = True, persist_mode: str = "full"):
+    logger.info("Iniciando pipeline completo: coleta → integração → análise → publicação do core")
+    collected = run_collector_v2(persist_mode=persist_mode)
+    if not collected:
+        logger.error("Coleta/integração falhou.")
+        return False
+
+    core = run_core_analysis()
+    if not core:
+        logger.error("Análise (core) falhou.")
+        return False
+
+    return publish_core_to_github(push=push)
 def main():
     """Função principal"""
     
@@ -125,42 +207,60 @@ def main():
         print("\n" + "="*60)
         print("🎯 MENU PRINCIPAL")
         print("="*60)
-        print("1. Coleta completa + Dashboard")
-        print("2. Apenas coletar dados (v2.0)")
+        print("1. Coleta completa + Dashboard (persist completo)")
+        print("2. Apenas coletar dados (persist completo)")
         print("3. Apenas abrir dashboard")
-        print("4. Coleta rápida (teste)")
+        print("4. Coleta incremental (somente ano/mês correntes)")
         print("5. Verificar sistema")
-        print("6. Sair")
+        print("6. Pipeline completo + commit/push do core (persist completo)")
+        print("7. Abrir dashboard_espelho.py")
+        print("8. Pipeline completo + commit/push do core (persist incremental)")
+        print("9. Sair")
         print("="*60)
         
-        choice = input("\nEscolha (1-6): ").strip()
+        choice = input("\nEscolha (1-9): ").strip()
         
         if choice == "1":
             # Coleta completa + Dashboard
             print("\n📊 Executando coleta completa...")
-            if run_collector_v2():
+            if run_collector_v2(persist_mode="full"):
                 print("\n✅ Coleta concluída! Iniciando dashboard...")
                 run_dashboard()
         
         elif choice == "2":
             # Apenas coleta
             print("\n📥 Coletando dados...")
-            run_collector_v2()
+            run_collector_v2(persist_mode="full")
         
         elif choice == "3":
             # Apenas dashboard
             run_dashboard()
         
         elif choice == "4":
-            # Coleta rápida
-            print("\n⚡ Coleta rápida...")
-            run_collector_v2()
+            # Coleta incremental
+            print("\n⚡ Coleta incremental (aproveitando dados históricos)...")
+            run_collector_v2(persist_mode="incremental")
         
         elif choice == "5":
             # Verificar sistema
             check_system()
         
         elif choice == "6":
+            print("\n🚀 Pipeline completo + publicação do core (persist completo)...")
+            run_pipeline_and_publish(push=True, persist_mode="full")
+
+        elif choice == "7":
+            print("\n🌐 Iniciando Dashboard Espelho...")
+            try:
+                subprocess.run([sys.executable, "-m", "streamlit", "run", "dashboard_espelho.py"], check=True)
+            except Exception as e:
+                print(f"❌ Erro ao executar dashboard_espelho: {e}")
+
+        elif choice == "8":
+            print("\n🚀 Pipeline completo + publicação do core (persist incremental)...")
+            run_pipeline_and_publish(push=True, persist_mode="incremental")
+
+        elif choice == "9":
             print("\n👋 Até logo!")
             break
         
@@ -181,7 +281,7 @@ def check_system():
             print(f"❌ {d}/ (não existe)")
     
     # Verifica arquivos principais
-    files = ["dashboard_integrado.py", "requirements.txt", "run_collector.py"]
+    files = ["dashboard_integrado.py", "dashboard_espelho.py", "requirements.txt", "run_collector.py", "core_analysis_latest.json"]
     for f in files:
         if os.path.exists(f):
             print(f"✅ {f}")
