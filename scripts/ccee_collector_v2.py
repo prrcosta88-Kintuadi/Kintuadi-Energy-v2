@@ -1,6 +1,9 @@
 # scripts/ccee_collector_v2.py - COM AUDITORIA
 import requests
 import pandas as pd
+import json
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, date
 import logging
 from typing import List, Dict, Optional, Any
@@ -262,51 +265,6 @@ class CCEEPLDCollector:
             "datasets": sorted(datasets, key=lambda d: int(d.get("year", 0))),
         }
 
-    def _download_pld_dump_csv_df(self) -> pd.DataFrame:
-        """Compat helper: usa API CKAN e retorna DataFrame de PLD."""
-        records = self._fetch_pld_data(days=400)
-        return pd.DataFrame(records) if records else pd.DataFrame()
-
-    def _fetch_pld_2026_dump_csv_records(self) -> List[Dict[str, Any]]:
-        """Baixa dump CSV direto do recurso PLD e retorna registros do ano de 2026."""
-        try:
-            response = requests.get(self._pld_2026_dump_csv, timeout=120)
-            response.raise_for_status()
-            if not response.text:
-                return []
-
-            # dump CSV da CCEE pode variar delimitador conforme ambiente/versão
-            df = pd.read_csv(
-                StringIO(response.text),
-                sep=None,
-                engine="python",
-                low_memory=False,
-            )
-
-            if df is None or df.empty:
-                return []
-
-            cols_map = {str(c).strip().upper(): str(c) for c in df.columns}
-            keep = {}
-            for target in ["MES_REFERENCIA", "DIA", "HORA", "PLD_HORA", "SUBMERCADO"]:
-                src = cols_map.get(target)
-                if src is not None:
-                    keep[target] = df[src]
-
-            if not keep:
-                return []
-
-            out = pd.DataFrame(keep)
-            if "MES_REFERENCIA" in out.columns:
-                out = out[out["MES_REFERENCIA"].astype(str).str.startswith("2026")]
-            if out.empty:
-                return []
-
-            return out.to_dict(orient="records")
-        except Exception as e:
-            logger.warning(f"CCEE: Falha ao obter dump CSV PLD 2026: {e}")
-            return []
-
     def collect_open_data_csv(self, limit: int = 500) -> Dict[str, Dict[str, Any]]:
         """Coleta datasets adicionais via links CSV (open data)."""
         datasets = {}
@@ -370,7 +328,7 @@ class CCEEPLDCollector:
         }
     
     def _fetch_pld_data(self, days: int) -> List[Dict]:
-        """Busca PLD na API CKAN datastore_search (sem download direto protegido)."""
+        """Busca PLD via API CKAN usando urllib (método recomendado pela CCEE)."""
         all_records: List[Dict[str, Any]] = []
         try:
             limit = max(40000, int(days) * 24 * 4)
@@ -383,18 +341,22 @@ class CCEEPLDCollector:
             "offset": 0,
             "sort": "_id desc",
         }
+        query = urllib.parse.urlencode(params)
+        url = f"{self.base_url}/datastore_search?{query}"
 
         try:
-            response = requests.get(f"{self.base_url}/datastore_search", params=params, timeout=120)
-            response.raise_for_status()
-            payload = response.json()
+            # Bypass de proxy do ambiente para seguir o exemplo oficial com urllib
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with opener.open(req, timeout=120) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
 
             if self.enable_audit:
                 self.audit_logger.log_api_call(
                     source="CCEE_PLD",
                     url=f"{self.base_url}/datastore_search",
                     params=params,
-                    response_status=response.status_code,
+                    response_status=200,
                     data_sample=(payload.get("result", {}).get("records", [])[:2] if isinstance(payload, dict) else []),
                 )
 
@@ -404,10 +366,10 @@ class CCEEPLDCollector:
 
             all_records = payload.get("result", {}).get("records", []) or []
         except Exception as e:
-            logger.error(f"CCEE: Erro na consulta datastore_search: {e}")
+            logger.error(f"CCEE: Erro na consulta datastore_search (urllib): {e}")
             return []
 
-        logger.info(f"CCEE: Total bruto coletado via CKAN: {len(all_records)} registros (limit={limit})")
+        logger.info(f"CCEE: Total bruto coletado via CKAN/urllib: {len(all_records)} registros (limit={limit})")
         return all_records
 
     def _create_pld_objects(self, raw_data: List[Dict]) -> List[PLDData]:
