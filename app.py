@@ -268,17 +268,16 @@ def main():
         <style>
           .stApp { background-color:#0b0f14; color:#f3f4f6; }
           [data-testid="stSidebar"] { display:none !important; }
-          .block-container { padding-top: 170px; }
+          .block-container { padding-top: 40px; }
           .fixed-header { position: fixed; top: 0; left:0; right:0; z-index:999; background:#0b0f14; }
           .full-bleed-line { height:1px; background:#c8a44d; width:100vw; margin-left:calc(50% - 50vw); }
-          .header-layer { background:#0f172a; padding:0.65rem 1rem; }
           .tabs-layer { background: linear-gradient(180deg, #0b1222 0%, #070d1a 100%); padding:0.25rem 0.4rem 0.05rem 0.4rem; }
           label { color:#ffffff !important; font-weight:700 !important; }
           .stTabs [data-baseweb="tab-list"] { gap: 0.15rem; flex-wrap: nowrap !important; overflow-x: auto !important; scrollbar-width: thin; }
           .stTabs [data-baseweb="tab"] { color:#e5e7eb; border-radius:6px; padding:0.25rem 0.45rem; font-size:0.78rem; white-space:nowrap; }
           .stTabs [aria-selected="true"] { background:#152238 !important; color:#f8fafc !important; border:1px solid #c8a44d !important; }
           div[data-testid="stFormSubmitButton"] > button {
-            background:#d4af37 !important; color:#111827 !important; font-weight:800 !important; border:1px solid #b38f2b !important;
+            background:#d4af37 !important; color:#111827 !important; font-weight:100 !important; border:1px solid #b38f2b !important;
           }
           div[data-testid="stFormSubmitButton"] > button:hover { background:#e3bf4c !important; color:#000 !important; }
           .cards-row { margin-bottom: 10px; }
