@@ -91,14 +91,19 @@ def _build_hourly_df(core: Dict[str, Any]) -> pd.DataFrame:
     if not load_sin.empty:
         df = df.join(load_sin, how="outer") if not df.empty else load_sin.to_frame()
 
-    for source_key, col in [
-        ("sin_fotovoltaica", "solar"),
-        ("sin_eolica", "wind"),
-        ("sin_termica", "thermal"),
-        ("sin_hidraulica", "hydro"),
-        ("sin_nuclear", "nuclear"),
+    for source_keys, col in [
+        (["sin_fotovoltaica", "sin_solar", "sin_fotov"], "solar"),
+        (["sin_eolica", "sin_eolielétrica", "sin_eolieletrica"], "wind"),
+        (["sin_termica", "sin_térmica"], "thermal"),
+        (["sin_hidraulica", "sin_hidroeletrica", "sin_hidroelétrica"], "hydro"),
+        (["sin_nuclear"], "nuclear"),
     ]:
-        s = _series_from_operacao((gen.get(source_key) or {}).get("serie", []), "geracao", col)
+        serie_records = []
+        for key in source_keys:
+            if (gen.get(key) or {}).get("serie"):
+                serie_records = (gen.get(key) or {}).get("serie", [])
+                break
+        s = _series_from_operacao(serie_records, "geracao", col)
         if not s.empty:
             df = df.join(s, how="outer") if not df.empty else s.to_frame()
 
@@ -150,9 +155,21 @@ def _build_hourly_df(core: Dict[str, Any]) -> pd.DataFrame:
         load_s = pd.to_numeric(df["load"], errors="coerce") if "load" in df.columns else pd.Series(np.nan, index=df.index)
         solar_s = pd.to_numeric(df["solar"], errors="coerce") if "solar" in df.columns else z
         wind_s = pd.to_numeric(df["wind"], errors="coerce") if "wind" in df.columns else z
+        hydro_s = pd.to_numeric(df["hydro"], errors="coerce") if "hydro" in df.columns else z
+        thermal_s = pd.to_numeric(df["thermal"], errors="coerce") if "thermal" in df.columns else z
+        nuclear_s = pd.to_numeric(df["nuclear"], errors="coerce") if "nuclear" in df.columns else z
         cur_solar = pd.to_numeric(df["curtail_solar"], errors="coerce") if "curtail_solar" in df.columns else z
         cur_wind = pd.to_numeric(df["curtail_wind"], errors="coerce") if "curtail_wind" in df.columns else z
         df["net_load"] = load_s - solar_s.fillna(0) - wind_s.fillna(0)
+        # auditoria operacional solicitada: carga total e carga líquida por soma de fontes
+        df["carga_total_fontes"] = (
+            hydro_s.fillna(0)
+            + thermal_s.fillna(0)
+            + nuclear_s.fillna(0)
+            + solar_s.fillna(0)
+            + wind_s.fillna(0)
+        )
+        df["carga_liquida_fontes"] = hydro_s.fillna(0) + thermal_s.fillna(0) + nuclear_s.fillna(0)
         df["curtail_total"] = cur_solar.fillna(0) + cur_wind.fillna(0)
         if "cmo_dominante" not in df.columns:
             cmo_sm = ((adv.get("aderencia_fisico_economica", {}) or {}).get("cmo_horario_por_submercado", {}) or {})
@@ -277,7 +294,7 @@ def main():
           .stTabs [data-baseweb="tab"] { color:#e5e7eb; border-radius:6px; padding:0.25rem 0.45rem; font-size:0.78rem; white-space:nowrap; }
           .stTabs [aria-selected="true"] { background:#152238 !important; color:#f8fafc !important; border:1px solid #c8a44d !important; }
           div[data-testid="stFormSubmitButton"] > button {
-            background:#d4af37 !important; color:#111827 !important; font-weight:100 !important; border:1px solid #b38f2b !important;
+            background:#d4af37 !important; color:#111827 !important; font-weight:800 !important; border:1px solid #b38f2b !important;
           }
           div[data-testid="stFormSubmitButton"] > button:hover { background:#e3bf4c !important; color:#000 !important; }
           .cards-row { margin-bottom: 10px; }
@@ -313,7 +330,7 @@ def main():
     with colc2:
         logo = _prepare_logo(Path("streamlit/img/emblema_maatria.png"))
         if logo and logo.exists():
-            st.image(str(logo), width=210)
+            st.image(str(logo), width=300)
         else:
             st.markdown("## MAÁTria Energia")
 
@@ -415,6 +432,27 @@ def main():
 
     st.info(f"Estado Operativo do SIN: **{current_state}** | Período: **{selected_start}** até **{selected_end}**")
 
+    with st.expander("Ver tabela dos cards (hora a hora)", expanded=False):
+        card_cols = [
+            c
+            for c in [
+                "pld",
+                "cmo_dominante",
+                "sin_cost",
+                "t_prudencia",
+                "t_hidro",
+                "curtailment_loss",
+                "gfom_pct",
+                "isr",
+                "ipr",
+                "risk_gap",
+                "cvar_implicit",
+                "system_state",
+            ]
+            if c in dff.columns
+        ]
+        st.dataframe(_plot_df(dff[card_cols]), width="stretch", height=320)
+
     with tabs[0]:
         st.caption(f"Fotografia operativa do dia **{photo_day}** (D-1 por padrão).")
         st.caption("Montagem: séries horárias observadas de geração por fonte + carga e carga líquida (`Carga - (Solar + Eólica)`).")
@@ -426,14 +464,14 @@ def main():
         for src in ["hydro", "thermal", "nuclear", "solar", "wind"]:
             if src in dff_photo.columns:
                 fig.add_bar(x=dff_photo.index, y=dff_photo[src], name=labels[src])
-        if "load" in dff_photo.columns:
-            fig.add_scatter(x=dff_photo.index, y=dff_photo["load"], name="Carga", mode="lines")
-        if "net_load" in dff_photo.columns:
-            fig.add_scatter(x=dff_photo.index, y=dff_photo["net_load"], name="Carga Líquida", mode="lines")
+        if "carga_total_fontes" in dff_photo.columns:
+            fig.add_scatter(x=dff_photo.index, y=dff_photo["carga_total_fontes"], name="Carga", mode="lines")
+        if "carga_liquida_fontes" in dff_photo.columns:
+            fig.add_scatter(x=dff_photo.index, y=dff_photo["carga_liquida_fontes"], name="Carga Líquida", mode="lines")
         fig.update_layout(template="plotly_dark", barmode="stack", height=420)
         st.plotly_chart(fig, width="stretch")
         with st.expander("Ver dados do gráfico (hora a hora)"):
-            plot_cols = [c for c in ["load", "net_load", "solar", "wind", "hydro", "thermal", "nuclear"] if c in dff_photo.columns]
+            plot_cols = [c for c in ["carga_total_fontes", "carga_liquida_fontes", "solar", "wind", "hydro", "thermal", "nuclear"] if c in dff_photo.columns]
             st.dataframe(_plot_df(dff_photo[plot_cols]), width="stretch", height=280)
 
     with tabs[1]:
