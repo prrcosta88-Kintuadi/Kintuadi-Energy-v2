@@ -618,6 +618,11 @@ def _safe_corr(a: pd.Series, b: pd.Series, min_points: int = 24) -> Optional[flo
         df = pd.DataFrame({"a": a, "b": b}).dropna()
         if len(df) < min_points:
             return None
+        # Evita RuntimeWarning do numpy quando uma das séries tem desvio zero.
+        if df["a"].nunique(dropna=True) <= 1 or df["b"].nunique(dropna=True) <= 1:
+            return None
+        if float(np.nanstd(df["a"].values)) == 0.0 or float(np.nanstd(df["b"].values)) == 0.0:
+            return None
         corr = df["a"].corr(df["b"])
         if pd.isna(corr):
             return None
@@ -787,7 +792,7 @@ def _load_cmo_hourly_by_submarket() -> Dict[str, pd.Series]:
         df = df.dropna(subset=["submercado", "din_instante", "val_cmo"])
         if df.empty:
             return {}
-        df["hora"] = pd.to_datetime(df["din_instante"], errors="coerce").dt.floor("H")
+        df["hora"] = pd.to_datetime(df["din_instante"], errors="coerce").dt.floor("h")
         df = df.dropna(subset=["hora"])
         out: Dict[str, pd.Series] = {}
         for sm, grp in df.groupby("submercado"):
@@ -1386,7 +1391,8 @@ def _compute_advanced_cross_metrics(
         if not pld_series.empty and not carga_liquida.empty:
             df_rl = pd.DataFrame({"pld": pld_series, "carga_liquida": carga_liquida}).dropna().sort_index()
             if len(df_rl) >= 24:
-                rolling = df_rl["pld"].rolling(window=90 * 24, min_periods=24).corr(df_rl["carga_liquida"])
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    rolling = df_rl["pld"].rolling(window=90 * 24, min_periods=24).corr(df_rl["carga_liquida"])
                 if not rolling.dropna().empty:
                     rolling_corr_90d = float(rolling.dropna().iloc[-1])
     except Exception as e:

@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta, date
 import logging
 from typing import List, Dict, Optional, Any
-from io import BytesIO
+from io import StringIO
 try:
     from .data_models import PLDData, DataMetadata
 except Exception:
@@ -85,7 +85,7 @@ class CCEEPLDCollector:
             "sumario_distribuicao_mensal": "9e8e3f5f-58a8-4744-b6da-7309a4513fcb",
         }
         self._resource_show_url = f"{self.base_url}/resource_show"
-        self._pld_2026_dump_xml = "https://dadosabertos.ccee.org.br/datastore/dump/3f279d6b-1069-42f7-9b0a-217b084729c4?format=xml"
+        self._pld_2026_dump_csv = "https://dadosabertos.ccee.org.br/datastore/dump/3f279d6b-1069-42f7-9b0a-217b084729c4?bom=True"
     
     def collect_pld_data(self, days: int = 7) -> Dict:
         """Coleta dados PLD com auditoria completa"""
@@ -263,7 +263,7 @@ class CCEEPLDCollector:
                 continue
             datasets_by_year[yi] = {"year": yi, "records": g.to_dict(orient="records")}
 
-        recs_2026 = self._fetch_pld_2026_dump_xml_records()
+        recs_2026 = self._fetch_pld_2026_dump_csv_records()
         if recs_2026:
             datasets_by_year[2026] = {"year": 2026, "records": recs_2026}
 
@@ -279,19 +279,21 @@ class CCEEPLDCollector:
             "datasets": merged_datasets,
         }
 
-    def _fetch_pld_2026_dump_xml_records(self) -> List[Dict[str, Any]]:
-        """Baixa dump XML direto do recurso PLD e retorna registros do ano de 2026."""
+    def _fetch_pld_2026_dump_csv_records(self) -> List[Dict[str, Any]]:
+        """Baixa dump CSV direto do recurso PLD e retorna registros do ano de 2026."""
         try:
-            response = requests.get(self._pld_2026_dump_xml, timeout=120)
+            response = requests.get(self._pld_2026_dump_csv, timeout=120)
             response.raise_for_status()
-            content = response.content
-            if not content:
+            if not response.text:
                 return []
 
-            try:
-                df = pd.read_xml(BytesIO(content), xpath="//record")
-            except Exception:
-                df = pd.read_xml(BytesIO(content))
+            # dump CSV da CCEE pode variar delimitador conforme ambiente/versão
+            df = pd.read_csv(
+                StringIO(response.text),
+                sep=None,
+                engine="python",
+                low_memory=False,
+            )
 
             if df is None or df.empty:
                 return []
@@ -314,7 +316,7 @@ class CCEEPLDCollector:
 
             return out.to_dict(orient="records")
         except Exception as e:
-            logger.warning(f"CCEE: Falha ao obter dump XML PLD 2026: {e}")
+            logger.warning(f"CCEE: Falha ao obter dump CSV PLD 2026: {e}")
             return []
 
     def collect_open_data_csv(self, limit: int = 500) -> Dict[str, Dict[str, Any]]:

@@ -79,6 +79,31 @@ class KintuadiIntegratedCollectorV2:
             year = int(match_year.group(1))
         return year, month
 
+    def _should_persist_dataset(self, dataset_name: str, persist_mode: str) -> bool:
+        """
+        Regras de persistência:
+        - full: persiste tudo
+        - incremental: persiste apenas datasets que podem mudar no tempo:
+            * anualizado do ano corrente (YYYY)
+            * mensal do mês corrente (YYYY-MM)
+        """
+        mode = (persist_mode or "full").strip().lower()
+        if mode == "full":
+            return True
+
+        year, month = self._extract_year_month(dataset_name)
+        now = datetime.now()
+        current_year = now.year
+        current_month = now.month
+
+        if year != current_year:
+            return False
+
+        if month is None:
+            return True
+
+        return int(month) == int(current_month)
+
     def _persist_ons_dataset(self, dataset_name: str, file_path: str):
         if duckdb is None:
             return
@@ -386,7 +411,7 @@ class KintuadiIntegratedCollectorV2:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(content, f, indent=2, ensure_ascii=False)
 
-    def collect_all(self) -> Optional[Dict[str, Any]]:
+    def collect_all(self, persist_mode: str = "full") -> Optional[Dict[str, Any]]:
         if not self.modules_loaded:
             logger.error("Coletores não carregados.")
             return None
@@ -405,6 +430,7 @@ class KintuadiIntegratedCollectorV2:
                     "project": "Kintuadi Energy Intelligence",
                     "duckdb_enabled": duckdb is not None,
                     "duckdb_path": self.db_path,
+                    "persist_mode": (persist_mode or "full").strip().lower(),
                 },
                 "sources": {},
             }
@@ -418,7 +444,10 @@ class KintuadiIntegratedCollectorV2:
                     dataset_name = ds.get("dataset")
                     file_path = ds.get("file")
                     if dataset_name and file_path and os.path.exists(file_path):
-                        self._persist_ons_dataset(dataset_name, file_path)
+                        if self._should_persist_dataset(dataset_name, persist_mode):
+                            self._persist_ons_dataset(dataset_name, file_path)
+                        else:
+                            logger.info(f"Pulando persist ONS (modo incremental): {dataset_name}")
 
             logger.info("[2/2] Coletando dados da CCEE...")
             ccee_data = {}
@@ -447,6 +476,10 @@ class KintuadiIntegratedCollectorV2:
                     year = ds.get("year")
                     file_path = ds.get("file")
                     try:
+                        if (persist_mode or "full").strip().lower() == "incremental":
+                            if int(year) != datetime.now().year:
+                                logger.info(f"Pulando persist PLD (modo incremental): {year}")
+                                continue
                         if file_path and os.path.exists(file_path):
                             df_year = pd.read_csv(file_path)
                         else:
@@ -535,9 +568,9 @@ class KintuadiIntegratedCollectorV2:
         except Exception as e:
             logger.warning(f"Erro ao gerar resumo: {e}")
 
-    def quick_collect(self):
-        print("🚀 Iniciando coleta Kintuadi Energy v2...")
-        results = self.collect_all()
+    def quick_collect(self, persist_mode: str = "full"):
+        print(f"🚀 Iniciando coleta Kintuadi Energy v2... (persist_mode={persist_mode})")
+        results = self.collect_all(persist_mode=persist_mode)
         if not results:
             print("❌ Falha na coleta.")
             return None

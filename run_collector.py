@@ -79,12 +79,12 @@ def print_banner():
     """
     print(banner)
 
-def run_collector_v2():
+def run_collector_v2(persist_mode: str = "full"):
     """Executa o coletor v2.0"""
     try:
         from scripts.integrated_collector_v2 import KintuadiIntegratedCollectorV2
         collector = KintuadiIntegratedCollectorV2()
-        return collector.quick_collect()
+        return collector.quick_collect(persist_mode=persist_mode)
     except ImportError as e:
         logger.error(f"Erro ao importar coletor v2: {e}")
         return None
@@ -174,9 +174,9 @@ def publish_core_to_github(push: bool = True):
         return False
 
 
-def run_pipeline_and_publish(push: bool = True):
+def run_pipeline_and_publish(push: bool = True, persist_mode: str = "full"):
     logger.info("Iniciando pipeline completo: coleta → integração → análise → publicação do core")
-    collected = run_collector_v2()
+    collected = run_collector_v2(persist_mode=persist_mode)
     if not collected:
         logger.error("Coleta/integração falhou.")
         return False
@@ -207,46 +207,47 @@ def main():
         print("\n" + "="*60)
         print("🎯 MENU PRINCIPAL")
         print("="*60)
-        print("1. Coleta completa + Dashboard")
-        print("2. Apenas coletar dados (v2.0)")
+        print("1. Coleta completa + Dashboard (persist completo)")
+        print("2. Apenas coletar dados (persist completo)")
         print("3. Apenas abrir dashboard")
-        print("4. Coleta rápida (teste)")
+        print("4. Coleta incremental (somente ano/mês correntes)")
         print("5. Verificar sistema")
-        print("6. Pipeline completo + commit/push do core no GitHub")
+        print("6. Pipeline completo + commit/push do core (persist completo)")
         print("7. Abrir dashboard_espelho.py")
-        print("8. Sair")
+        print("8. Pipeline completo + commit/push do core (persist incremental)")
+        print("9. Sair")
         print("="*60)
         
-        choice = input("\nEscolha (1-8): ").strip()
+        choice = input("\nEscolha (1-9): ").strip()
         
         if choice == "1":
             # Coleta completa + Dashboard
             print("\n📊 Executando coleta completa...")
-            if run_collector_v2():
+            if run_collector_v2(persist_mode="full"):
                 print("\n✅ Coleta concluída! Iniciando dashboard...")
                 run_dashboard()
         
         elif choice == "2":
             # Apenas coleta
             print("\n📥 Coletando dados...")
-            run_collector_v2()
+            run_collector_v2(persist_mode="full")
         
         elif choice == "3":
             # Apenas dashboard
             run_dashboard()
         
         elif choice == "4":
-            # Coleta rápida
-            print("\n⚡ Coleta rápida...")
-            run_collector_v2()
+            # Coleta incremental
+            print("\n⚡ Coleta incremental (aproveitando dados históricos)...")
+            run_collector_v2(persist_mode="incremental")
         
         elif choice == "5":
             # Verificar sistema
             check_system()
         
         elif choice == "6":
-            print("\n🚀 Pipeline completo + publicação do core...")
-            run_pipeline_and_publish(push=True)
+            print("\n🚀 Pipeline completo + publicação do core (persist completo)...")
+            run_pipeline_and_publish(push=True, persist_mode="full")
 
         elif choice == "7":
             print("\n🌐 Iniciando Dashboard Espelho...")
@@ -256,6 +257,10 @@ def main():
                 print(f"❌ Erro ao executar dashboard_espelho: {e}")
 
         elif choice == "8":
+            print("\n🚀 Pipeline completo + publicação do core (persist incremental)...")
+            run_pipeline_and_publish(push=True, persist_mode="incremental")
+
+        elif choice == "9":
             print("\n👋 Até logo!")
             break
         
