@@ -3,19 +3,37 @@ import os
 from datetime import datetime, date, time
 from pathlib import Path
 from typing import Any, Dict, Optional
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import requests
+import gzip
 
+CORE_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json.gz"
 
+@st.cache_data(ttl=3600)
 def _load_core() -> Dict[str, Any]:
+
+    # 1️⃣ tenta carregar localmente (modo desenvolvimento)
     for p in [Path("data/core_analysis_latest.json"), Path("core_analysis_latest.json")]:
         if p.exists():
             with p.open("r", encoding="utf-8") as f:
                 return json.load(f)
+
+    # 2️⃣ fallback → baixar do GitHub Release
+    try:
+        r = requests.get(CORE_URL, timeout=300)
+        r.raise_for_status()
+
+        decompressed = gzip.decompress(r.content)
+        core = json.loads(decompressed.decode("utf-8"))
+        return core
+
+    except Exception as e:
+        st.error(f"Erro ao carregar core_analysis: {e}")
+
     return {}
 
 
@@ -1175,4 +1193,8 @@ Avaliar se o comportamento observado do **PLD** está **coerente com as condiç�
             st.success("Combine sempre sinais físicos (carga, geração, reservatórios) com sinais econômicos (PLD, CMO e custos).")
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     main()
+=======
+    main()
+>>>>>>> 48a05742d9eb08ed8b387ae5cc7ad5f37297048e
