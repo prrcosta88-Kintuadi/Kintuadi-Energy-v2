@@ -2035,7 +2035,12 @@ def _compute_advanced_cross_metrics(
         if not idx.empty:
             idx = idx.sort_values().unique()
             df_e = pd.DataFrame(index=idx)
+            df_e.index = pd.to_datetime(df_e.index)
+            year = df_e.index.year
             df_e["pld"] = pd.to_numeric(pld_h.reindex(idx), errors="coerce")
+            df_e["ano"] = df_e.index.year
+            df_e["pld_teto"] = df_e["pld"].groupby(year).transform("max")
+            df_e["pld_no_teto"] = df_e["pld"] >= df_e["pld_teto"] * 0.95
             df_e["cmo"] = pd.to_numeric(cmo_dom.reindex(idx), errors="coerce")
             df_e["load"] = pd.to_numeric(carga_sin.reindex(idx), errors="coerce")
             df_e["solar"] = pd.to_numeric(solar.reindex(idx), errors="coerce")
@@ -2081,7 +2086,8 @@ def _compute_advanced_cross_metrics(
             df_e["Thermal_inflex_ratio"] = (df_e["thermal_inflex"] / df_e["thermal_total"].replace(0, np.nan)).clip(lower=0, upper=1)
 
             # Step 2-10
-            df_e["SIN_cost_R$/h"] = df_e["geracao_total"] * df_e["pld"]
+            
+            df_e["SIN_cost_R$/h"] = df_e["load"] * df_e["pld"]
             df_e["thermal_real_cost"] = df_e["thermal_total"] * df_e["cvu_semana"]
             df_e["thermal_merit_cost"] = df_e["thermal_merit"] * df_e["cvu_semana"]
             df_e["thermal_prudential_dispatch"] = df_e["thermal_total"] - df_e["thermal_merit"]
@@ -2096,25 +2102,23 @@ def _compute_advanced_cross_metrics(
                 np.where(df_e["Hydro_gap"].abs() <= tol, "Hydro Necessary", "Hydro Deficit"),
             )
 
-            df_e["Hydro_preserved"] = (df_e["disp_sync_uhe"] - df_e["hydro"])
+            df_e["Hydro_preserved"] = (df_e["disp_sync_uhe"] - df_e["hydro"]).clip(lower=0)
             df_e["Water_value_R$/h"] = df_e["Hydro_preserved"] * df_e["cmo"]
             df_e["Curtailment_loss_R$/h"] = df_e["curtailed"] * df_e["pld"]
             df_e["avoidable_curtailment"] = df_e["curtailed"] * (1 - df_e["Thermal_inflex_ratio"].fillna(1))
             df_e["CVaR_implicit"] = (df_e["pld"] - df_e["cmo"]).clip(lower=0)
+            df_e.loc[df_e["pld_no_teto"], "CVaR_implicit"] = np.nan
             df_e["Risk_Aversion_Gap"] = df_e["CVaR_implicit"] - df_e["cvu_semana"]
             df_e["T_prudencia"] = np.where(
                 df_e["cmo"] > df_e["pld"],
                 df_e["Hydro_preserved"] * (df_e["cmo"] - df_e["pld"]),
-                df_e["Hydro_preserved"] * 0
+                0
             )
-            df_e["T_total"] = df_e["SIN_cost_R$/h"]
             df_e["T_eletric"] = df_e["thermal_merit_cost"]
             df_e["T_hidro"] = df_e["Water_value_R$/h"]
-            df_e["T_sistemica"] = np.where(
-                    df_e["cmo"] > df_e["pld"],
-                    df_e["geracao_total"] * (df_e["cmo"] - df_e["pld"]),
-                    df_e["geracao_total"] * (df_e["pld"] - df_e["cmo"])
-            )
+            df_e["T_sistemica"] = df_e["geracao_total"] * (df_e["cmo"] - df_e["pld"])
+            df_e["T_total"] = (df_e["T_eletric"] + df_e["T_hidro"] + df_e["T_prudencia"] + df_e["T_sistemica"])
+            df_e["infra_marginal_rent"] = df_e["SIN_cost_R$/h"] - (df_e["T_eletric"] + df_e["T_hidro"] + df_e["T_prudencia"] + df_e["T_sistemica"])
 
             economic = {
                 "dominant_submarket": dominant_sm,
@@ -2126,6 +2130,7 @@ def _compute_advanced_cross_metrics(
                     "Thermal_inflex_ratio": _series_to_hourly_dict(df_e["Thermal_inflex_ratio"]),
                 },
                 "sin_cost_hourly": _series_to_hourly_dict(df_e["SIN_cost_R$/h"], ndigits=4),
+                "infra_marginal_rent_hourly": _series_to_hourly_dict(df_e["infra_marginal_rent"], ndigits=4),
                 "disp_sync_uhe_hourly": _series_to_hourly_dict(df_e["disp_sync_uhe"], ndigits=4),
                 "geracao_total_hourly": _series_to_hourly_dict(df_e["geracao_total"], ndigits=4),
                 "pld_hourly": _series_to_hourly_dict(df_e["pld"], ndigits=4),
