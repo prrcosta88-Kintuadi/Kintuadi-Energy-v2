@@ -1193,8 +1193,3 @@ Avaliar se o comportamento observado do **PLD** está **coerente com as condiç�
             st.success("Combine sempre sinais físicos (carga, geração, reservatórios) com sinais econômicos (PLD, CMO e custos).")
 
 if __name__ == "__main__":
-<<<<<<< HEAD
-    main()
-=======
-    main()
->>>>>>> 48a05742d9eb08ed8b387ae5cc7ad5f37297048e
