@@ -11,7 +11,7 @@ import streamlit as st
 import requests
 import gzip
 
-CORE_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json.gz"
+CORE_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/archive/refs/tags/MAATria-Energia.tar.gz"
 
 @st.cache_data(ttl=3600)
 def _load_core() -> Dict[str, Any]:
