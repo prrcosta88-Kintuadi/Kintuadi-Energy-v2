@@ -62,6 +62,7 @@ def _build_hourly_df(core: Dict[str, Any]) -> pd.DataFrame:
         ("T_prudencia_hourly", "t_prudencia"),
         ("T_hidro_hourly", "t_hidro"),
         ("T_eletric_hourly", "t_eletric"),
+        ("T_sistemica_hourly", "t_sistemica"),
         ("CVaR_implicit_hourly", "cvar_implicit"),
         ("Risk_Aversion_Gap_hourly", "risk_gap"),
         ("curtailment_loss_hourly", "curtailment_loss"),
@@ -92,11 +93,11 @@ def _build_hourly_df(core: Dict[str, Any]) -> pd.DataFrame:
         df = df.join(load_sin, how="outer") if not df.empty else load_sin.to_frame()
 
     for source_keys, col in [
-        (["sin_fotovoltaica", "sin_solar", "sin_fotov"], "solar"),
-        (["sin_eolica", "sin_eolielétrica", "sin_eolieletrica"], "wind"),
-        (["sin_termica", "sin_térmica"], "thermal"),
-        (["sin_hidraulica", "sin_hidroeletrica", "sin_hidroelétrica"], "hydro"),
-        (["sin_nuclear"], "nuclear"),
+        (["fotovoltaica"], "solar"),
+        (["eolielétrica"], "wind"),
+        (["térmica"], "thermal"),
+        (["hidroelétrica"], "hydro"),
+        (["nuclear"], "nuclear"),
     ]:
         serie_records = []
         for key in source_keys:
@@ -162,14 +163,7 @@ def _build_hourly_df(core: Dict[str, Any]) -> pd.DataFrame:
         cur_wind = pd.to_numeric(df["curtail_wind"], errors="coerce") if "curtail_wind" in df.columns else z
         df["net_load"] = load_s - solar_s.fillna(0) - wind_s.fillna(0)
         # auditoria operacional solicitada: carga total e carga líquida por soma de fontes
-        df["carga_total_fontes"] = (
-            hydro_s.fillna(0)
-            + thermal_s.fillna(0)
-            + nuclear_s.fillna(0)
-            + solar_s.fillna(0)
-            + wind_s.fillna(0)
-        )
-        df["carga_liquida_fontes"] = hydro_s.fillna(0) + thermal_s.fillna(0) + nuclear_s.fillna(0)
+        df["carga_total"] = load_s
         df["curtail_total"] = cur_solar.fillna(0) + cur_wind.fillna(0)
         if "cmo_dominante" not in df.columns:
             cmo_sm = ((adv.get("aderencia_fisico_economica", {}) or {}).get("cmo_horario_por_submercado", {}) or {})
@@ -287,8 +281,8 @@ def main():
           [data-testid="stSidebar"] { display:none !important; }
           .block-container { padding-top: 40px; }
           .fixed-header { position: fixed; top: 0; left:0; right:0; z-index:999; background:#0b0f14; }
-          .full-bleed-line { height:1px; background:#c8a44d; width:100vw; margin-left:calc(50% - 50vw); }
-          .tabs-layer { background: linear-gradient(180deg, #0b1222 0%, #070d1a 100%); padding:0.25rem 0.4rem 0.05rem 0.4rem; }
+          .full-bleed-line { height:0.1px; background:#c8a44d; width:100vw; margin-left:calc(50% - 50vw); }
+          .tabs-layer { background: linear-gradient(180deg, #0b1222 0%, #070d1a 100%); padding:0.01rem 0.01rem 0.01rem 0.01rem; }
           label { color:#ffffff !important; font-weight:700 !important; }
           .stTabs [data-baseweb="tab-list"] { gap: 0.15rem; flex-wrap: nowrap !important; overflow-x: auto !important; scrollbar-width: thin; }
           .stTabs [data-baseweb="tab"] { color:#e5e7eb; border-radius:6px; padding:0.25rem 0.45rem; font-size:0.78rem; white-space:nowrap; }
@@ -297,7 +291,7 @@ def main():
             background:#d4af37 !important; color:#111827 !important; font-weight:800 !important; border:1px solid #b38f2b !important;
           }
           div[data-testid="stFormSubmitButton"] > button:hover { background:#e3bf4c !important; color:#000 !important; }
-          .cards-row { margin-bottom: 10px; }
+          .cards-row { margin-bottom: 5px; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -305,8 +299,54 @@ def main():
 
     core = _load_core()
     if not core:
-        st.error("core_analysis_latest.json não encontrado.")
-        return
+        st.warning("⚠️ core_analysis_latest.json não encontrado. Gerando nova análise...")
+        
+        # IMPORTANTE: Você precisa ter os dados brutos em algum lugar!
+        # Opção 1: Se os dados brutos estão em um arquivo
+        raw_data_path = Path("data/kintuadi_latest.json")  # ou o caminho correto
+        if raw_data_path.exists():
+            with open(raw_data_path, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+        else:
+            st.error("❌ Arquivo de dados brutos não encontrado. Não é possível gerar nova análise.")
+            return
+        
+        try:
+            # Importar a função build_core_analysis
+            from scripts.core_analysis import build_core_analysis
+            
+            # PASSAR OS DADOS BRUTOS, não o core vazio!
+            new_core = build_core_analysis(raw_data)
+            
+            if new_core:
+                # Verificar estrutura básica
+                required = ["timestamp", "hydrology", "prices"]
+                missing = [key for key in required if key not in new_core]
+                
+                if missing:
+                    st.warning(f"⚠️ Análise gerada, mas faltam campos obrigatórios: {missing}")
+                
+                # Salvar o arquivo
+                os.makedirs("data", exist_ok=True)
+                with open("data/core_analysis_latest.json", "w", encoding="utf-8") as f:
+                    json.dump(new_core, f, indent=2, ensure_ascii=False, default=str)
+                
+                st.success(f"✅ Nova análise gerada e salva! Timestamp: {new_core.get('timestamp', 'N/A')}")
+                
+                # Atualizar a variável core com o novo conteúdo
+                core = new_core
+            else:
+                st.error("❌ build_core_analysis retornou None")
+                return
+                
+        except ImportError:
+            st.error("❌ Não foi possível importar build_core_analysis de scripts.core_analysis")
+            return
+        except Exception as e:
+            st.error(f"❌ Erro ao gerar nova análise: {e}")
+            import traceback
+            traceback.print_exc()
+            return
 
     df = _build_hourly_df(core)
     if df.empty:
@@ -326,21 +366,37 @@ def main():
     st.markdown("<div class='fixed-header'>", unsafe_allow_html=True)
     st.markdown("<div class='full-bleed-line'></div>", unsafe_allow_html=True)
 
-    colc1, colc2, colc3 = st.columns([1, 2, 1])
+    colc1, colc2, colc3 = st.columns([1, 1, 1])
     with colc2:
         logo = _prepare_logo(Path("streamlit/img/emblema_maatria.png"))
         if logo and logo.exists():
-            st.image(str(logo), width=300)
+            st.image(str(logo), width=200)
         else:
             st.markdown("## MAÁTria Energia")
 
     st.markdown("<div class='full-bleed-line'></div>", unsafe_allow_html=True)
-    st.markdown("<div class='header-layer'>", unsafe_allow_html=True)
 
     analyze_clicked = False
     form_col, _ = st.columns([0.4, 0.6])
     with form_col:
         with st.form("period_form", clear_on_submit=False):
+            # CSS específico para este formulário
+            st.markdown("""
+            <style>
+            div[data-testid="stForm"] .stDateInput label {
+                font-size: 0.7rem !important;
+                margin-bottom: 2px !important;
+            }
+            div[data-testid="stForm"] .stDateInput input {
+                font-size: 0.75rem !important;
+                padding: 0.2rem 0.5rem !important;
+            }
+            div[data-testid="stForm"] .stFormSubmitButton button {
+                font-size: 0.7rem !important;
+                padding: 0.2rem 0.5rem !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
             c1, c2, c3 = st.columns([1.05, 1.05, 0.8])
             with c1:
                 dt_start = st.date_input("DE", value=st.session_state["date_start"], min_value=min_d, max_value=max_d)
@@ -350,9 +406,7 @@ def main():
                 st.markdown("<div style='height:1.65rem;'></div>", unsafe_allow_html=True)
                 analyze_clicked = st.form_submit_button("ANALISAR", use_container_width=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("<div class='full-bleed-line'></div>", unsafe_allow_html=True)
-    st.markdown("<div class='tabs-layer'>", unsafe_allow_html=True)
 
     tabs = st.tabs([
         "📸 Fotografia Operativa",
@@ -364,9 +418,7 @@ def main():
         "📘 Metodologia & Glossário",
     ])
 
-    st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("<div class='full-bleed-line'></div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
 
     if analyze_clicked:
         if dt_start > dt_end:
@@ -400,6 +452,7 @@ def main():
     total_sin_cost = pd.to_numeric(dff.get("sin_cost", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
     total_prud = pd.to_numeric(dff.get("t_prudencia", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
     total_agua = pd.to_numeric(dff.get("t_hidro", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
+    total_sistemica = pd.to_numeric(dff.get("t_sistemica", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
     total_curt_loss = pd.to_numeric(dff.get("curtailment_loss", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
     total_gfom = pd.to_numeric(dff.get("gfom_pct", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
     total_isr = pd.to_numeric(dff.get("isr", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
@@ -410,7 +463,8 @@ def main():
         ("CMO dominante", f"R$ {_fmt_ptbr(current.get('cmo_dominante', np.nan),2)}", "#3b82f6"),
         ("Custo Total SIN", _fmt_money_compact(total_sin_cost), "#f59e0b"),
         ("Custo Prudência", _fmt_money_compact(total_prud), "#ef4444"),
-        ("Valor Água", _fmt_money_compact(total_agua), "#14b8a6"),
+        ("Custo Hídrico", _fmt_money_compact(total_agua), "#14b8a6"),
+        ("Custo Sistêmico", _fmt_money_compact(total_sistemica), "#004918"),
         ("Curtailment", f"{_fmt_ptbr(current.get('curtail_total', np.nan),2)} MWmed", "#a78bfa"),
         ("Valor (R$) Curtailment", _fmt_money_compact(total_curt_loss), "#eab308"),
         ("GFOM", _fmt_ptbr(total_gfom,2), "#38bdf8"),
@@ -441,13 +495,13 @@ def main():
                 "sin_cost",
                 "t_prudencia",
                 "t_hidro",
+                "t_sistemica",
                 "curtailment_loss",
                 "gfom_pct",
                 "isr",
                 "ipr",
                 "risk_gap",
                 "cvar_implicit",
-                "system_state",
             ]
             if c in dff.columns
         ]
@@ -464,22 +518,40 @@ def main():
         for src in ["hydro", "thermal", "nuclear", "solar", "wind"]:
             if src in dff_photo.columns:
                 fig.add_bar(x=dff_photo.index, y=dff_photo[src], name=labels[src])
-        if "carga_total_fontes" in dff_photo.columns:
-            fig.add_scatter(x=dff_photo.index, y=dff_photo["carga_total_fontes"], name="Carga", mode="lines")
-        if "carga_liquida_fontes" in dff_photo.columns:
-            fig.add_scatter(x=dff_photo.index, y=dff_photo["carga_liquida_fontes"], name="Carga Líquida", mode="lines")
+        if "carga_total" in dff_photo.columns:
+            fig.add_scatter(x=dff_photo.index, y=dff_photo["carga_total"], name="Carga Total", mode="lines")
+        if "net_load" in dff_photo.columns:
+            fig.add_scatter(x=dff_photo.index, y=dff_photo["net_load"], name="Carga Líquida", mode="lines")
         fig.update_layout(template="plotly_dark", barmode="stack", height=420)
         st.plotly_chart(fig, width="stretch")
         with st.expander("Ver dados do gráfico (hora a hora)"):
-            plot_cols = [c for c in ["carga_total_fontes", "carga_liquida_fontes", "solar", "wind", "hydro", "thermal", "nuclear"] if c in dff_photo.columns]
+            plot_cols = [c for c in ["carga_total", "net_load", "solar", "wind", "hydro", "thermal", "nuclear"] if c in dff_photo.columns]
             st.dataframe(_plot_df(dff_photo[plot_cols]), width="stretch", height=280)
 
     with tabs[1]:
         pdf = _plot_df(dff)
-        decomp_cols = [c for c in ["t_hidro", "t_eletric", "t_prudencia"] if c in pdf.columns]
+        decomp_cols = [c for c in ["t_hidro", "t_sistemica", "t_prudencia"] if c in pdf.columns]
         if decomp_cols:
-            st.caption("Montagem: decomposição econômica horária `T_total = T_hidro + T_elétrico + T_prudência`.")
-            fig = px.bar(pdf, x="instante", y=decomp_cols, template="plotly_dark", barmode="stack")
+            st.caption("Montagem: decomposição econômica horária `T_total = T_hidro + T_sistêmica + T_prudência`.")
+            label_map = {
+                "t_hidro": "Custo Hídrico", "t_sistemica": "Custo Sistêmico", "t_prudencia": "Custo Prudencial"
+            }
+            fig = go.Figure()
+            fig = px.bar(
+                pdf,
+                x="instante",
+                y=decomp_cols,
+                template="plotly_dark",
+                barmode="stack"
+            )
+            # adicionar linha
+            fig.add_scatter(
+                x=pdf["instante"],
+                y=pdf["sin_cost"],
+                mode="lines",
+                name="Custo Total SIN",
+                line=dict(width=3)
+            ) 
             fig.update_layout(title="Decomposição horária empilhada (R$/h)")
             st.plotly_chart(fig, width="stretch")
             with st.expander("Ver dados do gráfico (hora a hora)"):
@@ -487,7 +559,10 @@ def main():
 
         if {"thermal", "thermal_prudential_dispatch"}.issubset(dff.columns):
             g2 = _plot_df(dff[["thermal", "thermal_prudential_dispatch"]])
-            fig2 = px.line(g2, x="instante", y=["thermal", "thermal_prudential_dispatch"], template="plotly_dark")
+            thermal_labels = {
+            "thermal": "Geração Térmica Total", "thermal_prudential_dispatch": "Geração Térmica Prudencial"
+            }
+            fig2 = px.line(g2, x="instante", y=["thermal", "thermal_prudential_dispatch"], template="plotly_dark", labels=thermal_labels)
             fig2.update_layout(title="Despacho térmico total vs despacho prudencial (MWmed)")
             st.plotly_chart(fig2, width="stretch")
             st.caption("A segunda curva mostra a parcela térmica associada à prudência operativa.")
@@ -499,7 +574,15 @@ def main():
         cols = [c for c in ["curtail_solar", "curtail_wind", "curtail_total"] if c in cdf.columns]
         if cols:
             st.caption("Montagem: curtailment horário por fonte (solar/eólica) e total agregado.")
-            fig = px.bar(cdf, x="instante", y=cols, template="plotly_dark", barmode="group")
+            fig = go.Figure()
+            fig = px.bar(
+                pdf,
+                x="instante",
+                y=["curtail_solar", "curtail_wind"],
+                template="plotly_dark",
+                barmode="stack"
+            )
+            #fig = px.bar(cdf, x="instante", y=cols, template="plotly_dark", barmode="group")
             st.plotly_chart(fig, width="stretch")
             with st.expander("Ver dados do gráfico (hora a hora)"):
                 st.dataframe(cdf[["instante"] + cols], width="stretch", height=280)
@@ -513,48 +596,133 @@ def main():
             "ENA_norm": np.nan,
             "Load pressure": np.nan,
         }
+        metrics_norm = {
+            "risk": np.tanh(metrics["Risk Gap"]/300),
+            "cvar": metrics["CVaR"]/100,
+            "ear": 1-metrics["EAR_norm"],
+            "ena": 1-metrics["ENA_norm"],
+            "load": abs(metrics["Load pressure"]-1),
+        }
+
         norm = ((core.get("economic") or {}).get("normalization_hourly") or {})
         if norm and not dff.empty:
             tkey = dff.index[-1].strftime("%Y-%m-%d %H:%M:%S")
             metrics["EAR_norm"] = (norm.get("EAR_norm") or {}).get(tkey, np.nan)
             metrics["ENA_norm"] = (norm.get("ENA_norm") or {}).get(tkey, np.nan)
             metrics["Load pressure"] = (norm.get("Load_norm") or {}).get(tkey, np.nan)
-        score_vals = [v for v in metrics.values() if pd.notna(v)]
-        coherence = 100 - np.clip(np.nanmean(np.abs(score_vals)) * 25 if score_vals else np.nan, 0, 100)
+        score_vals = [abs(v) for v in metrics_norm.values() if pd.notna(v)]
+        coherence = 100*(1-np.mean(score_vals))
+        coherence = np.clip(coherence,0,100)
         color = "🟢" if coherence >= 70 else ("🟡" if coherence >= 40 else "🔴")
-        st.metric("Coherence score", "-" if pd.isna(coherence) else f"{coherence:.1f}")
+        st.metric("Métrica de Coerência do SIN", "-" if pd.isna(coherence) else f"{coherence:.1f}")
         st.markdown(f"Classificação: {color}")
         st.json(metrics)
 
     with tabs[4]:
-        sim_shift = st.slider("Percentual de deslocamento do curtailment solar para 19h–23h", 0, 100, 0)
+
+        sim_shift = st.slider(
+            "Percentual de deslocamento do curtailment solar para 19h–23h",
+            0, 100, 0
+        )
         sim = dff.copy()
-        if not sim.empty and "curtail_solar" in sim.columns:
-            frac = sim_shift / 100.0
-            energy_shift = sim["curtail_solar"].fillna(0) * frac
-            night = sim.index.hour.isin([19, 20, 21, 22, 23])
-            if night.any():
-                per_hour = energy_shift.sum() / max(int(night.sum()), 1)
-                thermal_before = sim.get("thermal", pd.Series(0, index=sim.index)).fillna(0)
-                hydro_before = sim.get("hydro", pd.Series(0, index=sim.index)).fillna(0)
-                thermal_reduction = np.minimum(thermal_before.where(night, 0), per_hour)
-                rem = np.maximum(per_hour - thermal_reduction, 0)
-                hydro_reduction = np.minimum(hydro_before.where(night, 0), rem)
-                thermal_after = thermal_before - thermal_reduction
-                hydro_after = hydro_before - hydro_reduction
-                pld_proxy_after = sim.get("pld", pd.Series(np.nan, index=sim.index)) * (1 - 0.15 * (thermal_reduction / thermal_before.replace(0, np.nan)).fillna(0))
-                out = pd.DataFrame({
-                    "SIN cost before": sim.get("sin_cost", pd.Series(np.nan, index=sim.index)),
-                    "SIN cost after": sim.get("load", pd.Series(np.nan, index=sim.index)) * pld_proxy_after,
-                    "thermal before": thermal_before,
-                    "thermal after": thermal_after,
-                    "hydro before": hydro_before,
-                    "hydro after": hydro_after,
-                })
-                op = _plot_df(out)
-                st.plotly_chart(px.line(op, x="instante", y=[c for c in op.columns if c != "instante"], template="plotly_dark"), width="stretch")
-                with st.expander("Ver dados da simulação (hora a hora)"):
-                    st.dataframe(op, width="stretch", height=280)
+        if sim.empty:
+            st.warning("Sem dados suficientes para simulação.")
+            st.stop()
+        frac = sim_shift / 100.0
+        solar_curt = sim.get("curtail_solar", pd.Series(0, index=sim.index)).fillna(0)
+        # energia total deslocada
+        energy_shift = solar_curt * frac
+        night_hours = [19, 20, 21, 22, 23]
+        night_mask = sim.index.hour.isin(night_hours)
+        if night_mask.sum() == 0:
+            st.warning("Não há horas noturnas no período selecionado.")
+            st.stop()
+        # distribuição uniforme
+        per_hour = energy_shift.sum() / night_mask.sum()
+        thermal = sim.get("thermal", pd.Series(0, index=sim.index)).fillna(0)
+        hydro = sim.get("hydro", pd.Series(0, index=sim.index)).fillna(0)
+        thermal_after = thermal.copy()
+        hydro_after = hydro.copy()
+        for ts in sim.index[night_mask]:
+            remove_thermal = min(thermal_after.loc[ts], per_hour)
+            thermal_after.loc[ts] -= remove_thermal
+            remainder = per_hour - remove_thermal
+            if remainder > 0:
+                remove_hydro = min(hydro_after.loc[ts], remainder)
+                hydro_after.loc[ts] -= remove_hydro
+        # --------------------------
+        # cálculo da geração BESS
+        # --------------------------
+        bess = (thermal - thermal_after) + (hydro - hydro_after)
+        # dataframe antes
+        before = pd.DataFrame({
+            "hydro": hydro,
+            "thermal": thermal,
+            "nuclear": sim.get("nuclear", 0),
+            "solar": sim.get("solar", 0),
+            "wind": sim.get("wind", 0)
+        })
+        # dataframe depois
+        after = pd.DataFrame({
+            "hydro": hydro_after,
+            "thermal": thermal_after,
+            "nuclear": sim.get("nuclear", 0),
+            "solar": sim.get("solar", 0),
+            "wind": sim.get("wind", 0),
+            "bess": bess
+        })
+        labels = {
+            "hydro": "Hidro",
+            "thermal": "Térmica",
+            "nuclear": "Nuclear",
+            "solar": "Solar",
+            "wind": "Eólica",
+            "bess": "BESS"
+        }
+        # --------------------------
+        # gráfico antes
+        # --------------------------
+        st.subheader("Situação observada")
+        fig_before = go.Figure()
+        for src in ["hydro", "thermal", "nuclear", "solar", "wind"]:
+            if src in before.columns:
+                fig_before.add_bar(
+                    x=before.index,
+                    y=before[src],
+                    name=labels[src]
+                )
+        fig_before.update_layout(
+            template="plotly_dark",
+            barmode="stack",
+            height=400
+        )
+        st.plotly_chart(
+            fig_before,
+            width="stretch",
+            key="bess_generation_before"
+        )
+        # --------------------------
+        # gráfico depois
+        # --------------------------
+        st.subheader("Situação simulada (curtailment redistribuído)")
+        fig_after = go.Figure()
+        for src in ["hydro", "thermal", "nuclear", "solar", "wind", "bess"]:
+            if src in after.columns:
+                fig_after.add_bar(
+                    x=after.index,
+                    y=after[src],
+                    name=labels[src]
+                )
+        fig_after.update_layout(
+            template="plotly_dark",
+            barmode="stack",
+            height=400
+        )
+        st.plotly_chart(
+            fig_after,
+            width="stretch",
+            key="bess_generation_after"
+        )
 
     with tabs[5]:
         matrix_cols = [
@@ -567,189 +735,317 @@ def main():
             st.download_button("Exportar CSV", data=m.reset_index().to_csv(index=False).encode("utf-8"), file_name="matriz_horaria_sin.csv", mime="text/csv")
 
     with tabs[6]:
+
         st.markdown("### 📘 Metodologia & Glossário")
-        st.caption("Visão prática para operação e mercado: o que é calculado, por que importa e como interpretar.")
+        st.caption("Guia conceitual da plataforma: como os indicadores são calculados e como interpretar a operação do SIN.")
 
         with st.expander("🎯 1) Propósito da Plataforma", expanded=False):
             st.markdown("""
-            - A plataforma **não prevê PLD**.
-            - O foco é avaliar a **coerência operativa** entre:
-              - hidrologia
-              - disponibilidade de geração
-              - penetração renovável
-              - despacho térmico
-              - curtailment
-              - preços marginais
+    A plataforma **não tem como objetivo prever o PLD**.
 
-            **Fotografia Operativa do SIN** = diagnóstico **hora a hora** da condição física e econômica do sistema.
-            """)
-            st.info("Use esta aba como guia de leitura operacional, não como modelo de previsão.")
+    O foco é analisar a **coerência entre condições físicas do sistema e os sinais econômicos observados**, permitindo interpretar a operação do SIN em base **hora a hora**.
+
+    A análise cruza informações de:
+
+    - hidrologia
+    - disponibilidade de geração
+    - despacho térmico
+    - penetração de renováveis
+    - curtailment
+    - preços marginais (PLD e CMO)
+
+    **Fotografia Operativa do SIN**  
+    é um diagnóstico instantâneo da condição **física, energética e econômica** do sistema.
+    """)
+            st.info("Interprete esta aba como um guia de leitura do sistema elétrico, não como um modelo de previsão de preços.")
 
         with st.expander("⚙️ 2) Conceitos Fundamentais do SIN", expanded=False):
             st.markdown("""
-            **Carga (Demanda)**  
-            Consumo elétrico total observado em uma hora.
+    **Carga (Demanda)**  
+    Energia total consumida pelo sistema em uma determinada hora.
 
-            **Geração**  
-            Energia efetivamente produzida pelas fontes.
+    **Geração**  
+    Energia efetivamente produzida pelas diferentes fontes do sistema.
 
-            **Carga Líquida**  
-            Demanda que sobra para fontes flexíveis (hidro + térmica).
+    **Carga Líquida**  
+    Parcela da demanda que precisa ser atendida por fontes **flexíveis** (hidrelétricas e térmicas).
 
-            **Fórmula:**  
-            `Carga Líquida = Carga − (Solar + Eólica)`
+    **Fórmula**
 
-            **Valor da Água**  
-            Custo de oportunidade de usar água agora versus guardar para frente.
+    `Carga Líquida = Carga − (Solar + Eólica)`
 
-            **Proxy usado:** `CMO`.
-            """)
+    **Valor da Água**  
+    Representa o custo de oportunidade de utilizar água armazenada nos reservatórios agora em vez de preservá-la para uso futuro.
+
+    Como aproximação operacional, utilizamos o **CMO (Custo Marginal de Operação)** como proxy desse valor.
+    """)
 
         with st.expander("📊 3) Métricas Principais", expanded=False):
             st.markdown("""
-            **GFOM (%)**  
-            Despacho térmico fora da ordem de mérito.
+    ### GFOM (Geração Fora da Ordem de Mérito)
 
-            **Fórmula:** `GFOM = Térmica_GFOM / Térmica_Total`
+    Indica a parcela da geração térmica despachada **fora da lógica econômica do mérito de custo**.
 
-            **Leitura típica:**
-            - Baixo: `< 5%`
-            - Moderado: `5–15%`
-            - Alto: `> 15%`
+    **Fórmula**
 
-            ---
-            **Curtailment**  
-            Renovável disponível que não foi despachada.
+    `GFOM = Térmica_GFOM / Térmica_Total`
 
-            **Causas comuns:**
-            - limite de transmissão
-            - controle de frequência
-            - saturação do sistema
-            - inflexibilidade térmica
+    **Interpretação típica**
 
-            **Leitura econômica:** energia barata perdida.
+    - `< 5%` → despacho majoritariamente econômico  
+    - `5–15%` → despacho misto  
+    - `> 15%` → presença relevante de decisão operativa
 
-            ---
-            **IPR (Índice de Pressão Renovável)**  
-            `IPR = Renovável Disponível / Carga`
+    ---
 
-            ---
-            **ISR (Índice de Saturação Renovável)**  
-            `ISR = Renovável Disponível / Carga Líquida`
+    ### Curtailment
 
-            `ISR > 1` indica risco de saturação estrutural.
+    Energia renovável **disponível mas não utilizada pelo sistema**.
 
-            ---
-            **EAR (Energia Armazenada)**  
-            Estoque dos reservatórios (segurança futura).
+    Principais causas:
 
-            **ENA (Energia Natural Afluente)**  
-            Energia hidrológica que entra no sistema.
-            - ENA alta: alívio futuro
-            - ENA baixa: risco de escassez
-            """)
-            st.warning("Olhe IPR/ISR junto com curtailment para separar excesso renovável de restrição elétrica.")
+    - restrições de transmissão
+    - estabilidade elétrica
+    - saturação de geração
+    - inflexibilidade de usinas térmicas ou nucleares
+
+    **Leitura econômica**
+
+    energia de baixo custo que deixa de ser utilizada.
+
+    ---
+
+    ### IPR — Índice de Pressão Renovável
+
+    Mede o peso das renováveis sobre a demanda.
+
+    `IPR = Renovável Disponível / Carga`
+
+    ---
+
+    ### ISR — Índice de Saturação Renovável
+
+    Avalia a pressão renovável sobre a parcela flexível da demanda.
+
+    `ISR = Renovável Disponível / Carga Líquida`
+
+    Quando:
+
+    `ISR > 1`
+
+    há risco de **saturação estrutural de geração renovável**.
+
+    ---
+
+    ### EAR — Energia Armazenada
+
+    Estoque de energia contido nos reservatórios hidráulicos.
+
+    Representa a **segurança energética futura do sistema**.
+
+    ---
+
+    ### ENA — Energia Natural Afluente
+
+    Energia hidrológica que entra naturalmente no sistema por meio das vazões.
+
+    Interpretação:
+
+    - **ENA alta** → tendência de alívio hidrológico  
+    - **ENA baixa** → aumento do risco de escassez
+    """)
+
+            st.warning("Interprete sempre IPR e ISR junto com o curtailment para distinguir excesso renovável de restrições elétricas.")
 
         with st.expander("💰 4) Decomposição Econômica do Sistema", expanded=False):
             st.markdown("""
-            **Estrutura central:**
+    A plataforma separa o custo horário do sistema em três componentes econômicos.
 
-            `T_total = T_hidro + T_elétrico + T_prudência`
+    ### Estrutura central
 
-            - **T_hidro:** custo associado ao valor de oportunidade da água
-            - **T_elétrico:** custo estrutural para atender carga
-            - **T_prudência:** custo adicional por decisão conservadora de operação
+    `T_total = T_hidro + T_elétrico + T_prudência`
 
-            **Custo da Prudência** = valor extra pago hoje para preservar reservatório.
-            """)
+    onde:
+
+    **T_hidro — Custo Hidrológico**
+
+    Valor econômico associado ao uso ou preservação da água dos reservatórios.
+
+    A água funciona como um **ativo energético armazenável**.
+
+    ---
+
+    **T_elétrico — Custo Estrutural**
+
+    Custo mínimo necessário para atender a carga considerando a estrutura da matriz elétrica.
+
+    Inclui principalmente:
+
+    - geração térmica por mérito
+    - geração inflexível
+    - características estruturais do sistema
+
+    ---
+
+    **T_prudência — Custo de Decisão Operativa**
+
+    Custo adicional associado a decisões conservadoras de operação.
+
+    Pode surgir quando o operador:
+
+    - preserva reservatórios
+    - mantém geração térmica adicional
+    - restringe geração renovável
+    - prioriza segurança elétrica do sistema
+
+    **Custo da Prudência**
+
+    representa o **valor adicional pago hoje para preservar flexibilidade energética futura**.
+    """)
 
         with st.expander("🛡️ 5) CVaR e Aversão ao Risco", expanded=False):
             st.markdown("""
-            O ONS otimiza considerando cenários hidrológicos adversos.
+    O planejamento da operação do sistema considera cenários hidrológicos adversos.
 
-            Exemplo de calibração: `(15%, 40%)`
-            - piores 15% cenários hidrológicos
-            - com peso de 40% na decisão operativa
+    Para isso são utilizados mecanismos de **aversão ao risco**, como o **CVaR (Conditional Value at Risk)**.
 
-            Mais aversão a risco tende a gerar:
-            `mais térmica → maior PLD`
+    Exemplo de calibração utilizada no setor:
 
-            **CVaR Implícito:**
-            `CVaR_implícito = PLD − CMO dominante`
-            """)
+    `(15%, 40%)`
+
+    significando:
+
+    - análise dos **15% piores cenários hidrológicos**
+    - com **peso de 40%** na decisão operativa
+
+    Quanto maior a aversão ao risco:
+
+    - maior tendência de preservação hídrica
+    - maior despacho térmico
+    - maior pressão sobre o PLD
+
+    ### CVaR Implícito Observado
+
+    Na plataforma estimamos um valor aproximado da aversão ao risco observada:
+
+    `CVaR_implícito = PLD − CMO dominante`
+    """)
 
         with st.expander("📉 6) Risk Aversion Gap", expanded=False):
             st.markdown("""
-            **Definição:**
-            `Risk Gap = CVaR_implícito − CVU_médio`
+    O **Risk Aversion Gap** compara o nível de aversão ao risco observado com o custo médio da geração térmica.
 
-            **Leitura:**
-            - positivo: regime de forte precaução
-            - próximo de zero: operação neutra
-            - negativo: regime de abundância
-            """)
+    **Definição**
+
+    `Risk Gap = CVaR_implícito − CVU_médio`
+
+    **Interpretação**
+
+    - **positivo** → operação conservadora  
+    - **próximo de zero** → operação neutra  
+    - **negativo** → sistema em regime de abundância energética
+    """)
 
         with st.expander("💧 7) Teste de Necessidade Hidráulica", expanded=False):
             st.markdown("""
-            **Passo 1 — Geração mandatória:**
-            `Renováveis + Nuclear + Térmica inflexível`
+    Esse teste avalia quanto da geração hidráulica é **estruturalmente necessária** para atender a demanda.
 
-            **Passo 2 — Hidro necessária:**
-            `Hidro_necessária = Carga − Geração_mandatória`
+    ### Passo 1 — Geração mandatória
 
-            **Passo 3 — Comparação com hidro observada:**
-            - Hidro observada > necessária → sistema hidro-dominante
-            - Hidro observada < necessária → dependência térmica
-            """)
+    `Renováveis + Nuclear + Térmica Inflexível`
 
-        with st.expander("🧾 8) Custo do SIN (R$/h)", expanded=False):
+    ### Passo 2 — Hidro necessária
+
+    `Hidro_necessária = Carga − Geração_mandatória`
+
+    ### Passo 3 — Comparação com a geração observada
+
+    - `Hidro observada > Hidro necessária`  
+    → sistema com forte presença hidráulica
+
+    - `Hidro observada < Hidro necessária`  
+    → maior dependência térmica
+    """)
+
+        with st.expander("🧾 8) Custo Econômico do SIN (R$/h)", expanded=False):
             st.markdown("""
-            **Exposição econômica horária:**
+    A exposição econômica total do sistema pode ser aproximada por:
 
-            `Custo SIN = Carga × PLD`
+    `Custo SIN = Carga × PLD`
 
-            Representa o sinal econômico total de liquidação naquela hora.
-            """)
+    Esse valor representa o **sinal econômico agregado de liquidação do mercado naquela hora**.
 
-        with st.expander("🔋 9) Curtailment como Armazenamento Implícito", expanded=False):
+    Ele não corresponde ao custo físico real de produção, mas ao **valor econômico da energia transacionada**.
+    """)
+
+        with st.expander("🔋 9) Curtailment como Armazenamento Hidráulico Implícito", expanded=False):
             st.markdown("""
-            Quando solar/eólica entram e reduzem despacho hidráulico,
-            parte da água fica guardada.
+    Quando geração solar ou eólica entra no sistema e **reduz o despacho hidráulico**, parte da água permanece armazenada.
 
-            Nesse sentido, renováveis funcionam como:
-            **"armazenamento hídrico virtual"**.
+    Nesse sentido, renováveis funcionam como um tipo de:
 
-            **Valor estimado:**
-            `Hidro evitada × CMO`
-            """)
+    **armazenamento hidráulico virtual**
+
+    pois deslocam geração hidráulica para o futuro.
+
+    Uma estimativa simplificada do valor desse efeito pode ser expressa como:
+
+    `Hidro evitada × CMO`
+    """)
 
         with st.expander("🏷️ 10) Classificação Operativa do SIN", expanded=False):
             st.markdown("""
-            **Regimes do painel (exemplos):**
+    A plataforma classifica o estado do sistema em regimes operativos.
 
-            - **Escassez Hidrológica:** baixa folga hídrica e maior pressão térmica
-            - **Preservação Hídrica:** estratégia de poupar reservatório
-            - **Saturação Renovável:** renovável acima da capacidade de absorção
-            - **Stress Operativo:** sinais simultâneos de risco físico e econômico
-            - **Equilíbrio Estrutural:** operação estável, sem pressão relevante
-            """)
+    Exemplos:
+
+    **Escassez Hidrológica**
+
+    Baixo armazenamento e aumento da dependência térmica.
+
+    ---
+
+    **Preservação Hídrica**
+
+    Estratégia deliberada de manter níveis de reservatórios.
+
+    ---
+
+    **Saturação Renovável**
+
+    Excesso instantâneo de geração renovável em relação à capacidade de absorção do sistema.
+
+    ---
+
+    **Stress Operativo**
+
+    Sinais simultâneos de risco físico e pressão econômica.
+
+    ---
+
+    **Equilíbrio Estrutural**
+
+    Operação estável, sem pressões relevantes sobre geração ou armazenamento.
+    """)
 
         with st.expander("🧭 11) Como Interpretar o Dashboard", expanded=False):
             st.markdown("""
-            **Roteiro rápido de uso:**
+    ### Roteiro sugerido de leitura
 
-            1. Selecione hora/período
-            2. Leia os KPIs principais
-            3. Verifique o score de coerência
-            4. Analise a decomposição de custos
-            5. Confira causas de curtailment
-            6. Rode a simulação BESS
-            7. Compare a resposta do sistema
+    1️⃣ selecione o período de análise  
+    2️⃣ observe os indicadores principais  
+    3️⃣ verifique o score de coerência operativa  
+    4️⃣ analise a decomposição econômica do sistema  
+    5️⃣ identifique causas de curtailment  
+    6️⃣ utilize a simulação BESS  
+    7️⃣ compare a resposta do sistema
 
-            **Objetivo final:** entender se o comportamento do PLD está fisicamente coerente.
-            """)
-            st.success("Leitura executiva: combine sempre sinais físicos (carga, geração, reservatórios) com sinais econômicos (PLD, CMO, custos).")
+    ### Objetivo final
 
+    Avaliar se o comportamento observado do **PLD** está **coerente com as condições físicas do SIN**.
+    """)
+
+            st.success("Interpretação executiva: combine sempre sinais físicos (carga, geração, reservatórios) com sinais econômicos (PLD, CMO e custos).")
 
 if __name__ == "__main__":
     main()
