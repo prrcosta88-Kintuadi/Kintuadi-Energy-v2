@@ -24,7 +24,7 @@ def _load_core() -> Dict[str, Any]:
 
     # 2️⃣ fallback → baixar do GitHub Release
     try:
-        r = requests.get(CORE_URL, timeout=300)
+        r = requests.get(CORE_URL, timeout=300000)
         r.raise_for_status()
 
         decompressed = gzip.decompress(r.content)
