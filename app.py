@@ -11,7 +11,7 @@ import streamlit as st
 import requests
 import gzip
 
-CORE_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/archive/refs/tags/MAATria-Energia.tar.gz"
+CORE_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json"
 
 @st.cache_data(ttl=3600)
 def _load_core() -> Dict[str, Any]:
@@ -24,18 +24,14 @@ def _load_core() -> Dict[str, Any]:
 
     # 2️⃣ fallback → baixar do GitHub Release
     try:
-        r = requests.get(CORE_URL, timeout=300000)
+        r = requests.get(CORE_URL, timeout=30000)
         r.raise_for_status()
-
-        decompressed = gzip.decompress(r.content)
-        core = json.loads(decompressed.decode("utf-8"))
-        return core
+        return r.json()
 
     except Exception as e:
         st.error(f"Erro ao carregar core_analysis: {e}")
 
     return {}
-
 
 def _series_from_hourly(d: Dict[str, Any], name: str) -> pd.Series:
     if not isinstance(d, dict) or not d:
