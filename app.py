@@ -70,6 +70,7 @@ def _build_hourly_df(core: Dict[str, Any]) -> pd.DataFrame:
         ("required_hydro_hourly", "required_hydro"),
         ("mandatory_generation_hourly", "mandatory_generation"),
         ("thermal_prudential_dispatch_hourly", "thermal_prudential_dispatch"),
+        ("infra_marginal_rent_hourly", "infra_marginal_rent"),
     ]:
         s = _series_from_hourly(econ.get(k, {}), col)
         if not s.empty:
@@ -453,6 +454,8 @@ def main():
     total_prud = pd.to_numeric(dff.get("t_prudencia", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
     total_agua = pd.to_numeric(dff.get("t_hidro", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
     total_sistemica = pd.to_numeric(dff.get("t_sistemica", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
+    total_eletrica = pd.to_numeric(dff.get("t_eletric", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
+    total_infra_marginal = pd.to_numeric(dff.get("infra_marginal_rent", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
     total_curt_loss = pd.to_numeric(dff.get("curtailment_loss", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
     total_gfom = pd.to_numeric(dff.get("gfom_pct", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
     total_isr = pd.to_numeric(dff.get("isr", pd.Series(dtype=float)), errors="coerce").sum(min_count=1)
@@ -464,7 +467,9 @@ def main():
         ("Custo Total SIN", _fmt_money_compact(total_sin_cost), "#f59e0b"),
         ("Custo Prudência", _fmt_money_compact(total_prud), "#ef4444"),
         ("Custo Hídrico", _fmt_money_compact(total_agua), "#14b8a6"),
+        ("Custo Elétrico", _fmt_money_compact(total_eletrica), "#FFEE00"),
         ("Custo Sistêmico", _fmt_money_compact(total_sistemica), "#004918"),
+        ("Custo Infra-marginal", _fmt_money_compact(total_infra_marginal), "#3D0049"),
         ("Curtailment", f"{_fmt_ptbr(current.get('curtail_total', np.nan),2)} MWmed", "#a78bfa"),
         ("Valor (R$) Curtailment", _fmt_money_compact(total_curt_loss), "#eab308"),
         ("GFOM", _fmt_ptbr(total_gfom,2), "#38bdf8"),
@@ -474,9 +479,9 @@ def main():
         ("CVaR Implícito", f"R$ {_fmt_ptbr(current.get('cvar_implicit', np.nan),2)}", "#60a5fa"),
     ]
 
-    for base in (0, 6):
-        cols = st.columns(6)
-        for i in range(6):
+    for base in (0, 5, 10):
+        cols = st.columns(5)
+        for i in range(5):
             idx = base + i
             if idx < len(kpis):
                 lab, val, color = kpis[idx]
@@ -495,8 +500,11 @@ def main():
                 "sin_cost",
                 "t_prudencia",
                 "t_hidro",
+                "t_eletric",
                 "t_sistemica",
+                "infra_marginal_rent",
                 "curtailment_loss",
+                "curtail_total"
                 "gfom_pct",
                 "isr",
                 "ipr",
@@ -530,11 +538,11 @@ def main():
 
     with tabs[1]:
         pdf = _plot_df(dff)
-        decomp_cols = [c for c in ["t_hidro", "t_sistemica", "t_prudencia"] if c in pdf.columns]
+        decomp_cols = [c for c in ["t_hidro", "t_sistemica", "t_prudencia", "t_eletric"] if c in pdf.columns]
         if decomp_cols:
             st.caption("Montagem: decomposição econômica horária `T_total = T_hidro + T_sistêmica + T_prudência`.")
             label_map = {
-                "t_hidro": "Custo Hídrico", "t_sistemica": "Custo Sistêmico", "t_prudencia": "Custo Prudencial"
+                "t_hidro": "Custo Hídrico", "t_sistemica": "Custo Sistêmico", "t_prudencia": "Custo Prudencial", "t_eletric": "Custo elétrico"
             }
             fig = go.Figure()
             fig = px.bar(
@@ -568,6 +576,74 @@ def main():
             st.caption("A segunda curva mostra a parcela térmica associada à prudência operativa.")
             with st.expander("Ver dados do gráfico térmico (hora a hora)"):
                 st.dataframe(g2, width="stretch", height=260)
+
+        # ===============================
+        # HEATMAP – INFRA MARGINAL RENT
+        # ===============================
+
+        if "infra_marginal_rent" in df.columns:
+
+            st.subheader("Mapa estrutural — Renda Infra-Marginal do SIN")
+            st.caption(
+                "Mapa calculado sobre toda a base histórica disponível. "
+                "Os dados são diários, mas o eixo Y marca as mudanças de mês."
+            )
+
+            heat_df = df.copy()
+
+            heat_df["data"] = heat_df.index.date
+            heat_df["hora"] = heat_df.index.hour
+
+            pivot = heat_df.pivot_table(
+                index="data",
+                columns="hora",
+                values="infra_marginal_rent",
+                aggfunc="mean"
+            )
+
+            # converter índice para datetime para manipular meses
+            pivot.index = pd.to_datetime(pivot.index)
+
+            # localizar início de cada mês
+            month_starts = pivot.index.to_series().groupby(
+                [pivot.index.year, pivot.index.month]
+            ).first()
+
+            y_ticks = pd.to_datetime(month_starts.values)
+            y_labels = [d.strftime("%m-%Y") for d in y_ticks]
+
+            fig_heat = go.Figure(
+                data=go.Heatmap(
+                    z=pivot.values,
+                    x=pivot.columns,
+                    y=pivot.index,
+                    colorscale="RdBu_r",
+                    colorbar=dict(title="R$/h"),
+                    xgap=2,   # espaço entre horas
+                    ygap=0    # pequeno espaço entre dias
+                )
+            )
+
+            fig_heat.update_layout(
+                template="plotly_dark",
+                height=5000,
+                xaxis=dict(
+                    title="Hora do dia",
+                    tickmode="linear",
+                    dtick=1
+                ),
+                yaxis=dict(
+                    title="Data",
+                    tickmode="array",
+                    tickvals=y_ticks,
+                    ticktext=y_labels
+                )
+            )
+
+            st.plotly_chart(fig_heat, width="stretch")
+
+            with st.expander("Ver dados do mapa de calor (base completa)"):
+                st.dataframe(pivot, width="stretch", height=300)
 
     with tabs[2]:
         cdf = _plot_df(dff)
@@ -741,311 +817,362 @@ def main():
 
         with st.expander("🎯 1) Propósito da Plataforma", expanded=False):
             st.markdown("""
-    A plataforma **não tem como objetivo prever o PLD**.
+A plataforma **não tem como objetivo prever o PLD**.
 
-    O foco é analisar a **coerência entre condições físicas do sistema e os sinais econômicos observados**, permitindo interpretar a operação do SIN em base **hora a hora**.
+O foco é analisar a **coerência entre condições físicas do sistema e os sinais econômicos observados**, permitindo interpretar a operação do SIN em base **hora a hora**.
 
-    A análise cruza informações de:
+A análise cruza informações de:
 
-    - hidrologia
-    - disponibilidade de geração
-    - despacho térmico
-    - penetração de renováveis
-    - curtailment
-    - preços marginais (PLD e CMO)
+- hidrologia
+- disponibilidade de geração
+- despacho térmico
+- penetração de renováveis
+- curtailment
+- preços marginais (PLD e CMO)
 
-    **Fotografia Operativa do SIN**  
-    é um diagnóstico instantâneo da condição **física, energética e econômica** do sistema.
-    """)
+**Fotografia Operativa do SIN**
+
+é um diagnóstico instantâneo da condição **física, energética e econômica** do sistema.
+""")
             st.info("Interprete esta aba como um guia de leitura do sistema elétrico, não como um modelo de previsão de preços.")
 
         with st.expander("⚙️ 2) Conceitos Fundamentais do SIN", expanded=False):
             st.markdown("""
-    **Carga (Demanda)**  
-    Energia total consumida pelo sistema em uma determinada hora.
+**Carga (Demanda)**  
+Energia total consumida pelo sistema em uma determinada hora.
 
-    **Geração**  
-    Energia efetivamente produzida pelas diferentes fontes do sistema.
+**Geração**  
+Energia efetivamente produzida pelas diferentes fontes do sistema.
 
-    **Carga Líquida**  
-    Parcela da demanda que precisa ser atendida por fontes **flexíveis** (hidrelétricas e térmicas).
+**Carga Líquida**  
+Parcela da demanda que precisa ser atendida por fontes **flexíveis** (hidrelétricas e térmicas).
 
-    **Fórmula**
+**Fórmula**
 
-    `Carga Líquida = Carga − (Solar + Eólica)`
+`Carga Líquida = Carga − (Solar + Eólica)`
 
-    **Valor da Água**  
-    Representa o custo de oportunidade de utilizar água armazenada nos reservatórios agora em vez de preservá-la para uso futuro.
+**Valor da Água**
 
-    Como aproximação operacional, utilizamos o **CMO (Custo Marginal de Operação)** como proxy desse valor.
-    """)
+Representa o custo de oportunidade de utilizar água armazenada nos reservatórios agora em vez de preservá-la para uso futuro.
+
+Como aproximação operacional, utilizamos o **CMO (Custo Marginal de Operação)** como proxy desse valor.
+""")
 
         with st.expander("📊 3) Métricas Principais", expanded=False):
             st.markdown("""
-    ### GFOM (Geração Fora da Ordem de Mérito)
+### GFOM (Geração Fora da Ordem de Mérito)
 
-    Indica a parcela da geração térmica despachada **fora da lógica econômica do mérito de custo**.
+Indica a parcela da geração térmica despachada **fora da lógica econômica do mérito de custo**.
 
-    **Fórmula**
+**Fórmula**
 
-    `GFOM = Térmica_GFOM / Térmica_Total`
+`GFOM = Térmica_GFOM / Térmica_Total`
 
-    **Interpretação típica**
+**Interpretação típica**
 
-    - `< 5%` → despacho majoritariamente econômico  
-    - `5–15%` → despacho misto  
-    - `> 15%` → presença relevante de decisão operativa
+- `< 5%` → despacho majoritariamente econômico  
+- `5–15%` → despacho misto  
+- `> 15%` → presença relevante de decisão operativa
 
-    ---
+---
 
-    ### Curtailment
+### Curtailment
 
-    Energia renovável **disponível mas não utilizada pelo sistema**.
+Energia renovável **disponível mas não utilizada pelo sistema**.
 
-    Principais causas:
+Principais causas:
 
-    - restrições de transmissão
-    - estabilidade elétrica
-    - saturação de geração
-    - inflexibilidade de usinas térmicas ou nucleares
+- restrições de transmissão
+- estabilidade elétrica
+- saturação de geração
+- inflexibilidade de usinas térmicas ou nucleares
 
-    **Leitura econômica**
+**Leitura econômica**
 
-    energia de baixo custo que deixa de ser utilizada.
+energia de baixo custo que deixa de ser utilizada.
 
-    ---
+---
 
-    ### IPR — Índice de Pressão Renovável
+### IPR — Índice de Pressão Renovável
 
-    Mede o peso das renováveis sobre a demanda.
+Mede o peso das renováveis sobre a demanda.
 
-    `IPR = Renovável Disponível / Carga`
+`IPR = Renovável Disponível / Carga`
 
-    ---
+---
 
-    ### ISR — Índice de Saturação Renovável
+### ISR — Índice de Saturação Renovável
 
-    Avalia a pressão renovável sobre a parcela flexível da demanda.
+Avalia a pressão renovável sobre a parcela flexível da demanda.
 
-    `ISR = Renovável Disponível / Carga Líquida`
+`ISR = Renovável Disponível / Carga Líquida`
 
-    Quando:
+Quando:
 
-    `ISR > 1`
+`ISR > 1`
 
-    há risco de **saturação estrutural de geração renovável**.
+há risco de **saturação estrutural de geração renovável**.
 
-    ---
+---
 
-    ### EAR — Energia Armazenada
+### EAR — Energia Armazenada
 
-    Estoque de energia contido nos reservatórios hidráulicos.
+Estoque de energia contido nos reservatórios hidráulicos.
 
-    Representa a **segurança energética futura do sistema**.
+Representa a **segurança energética futura do sistema**.
 
-    ---
+---
 
-    ### ENA — Energia Natural Afluente
+### ENA — Energia Natural Afluente
 
-    Energia hidrológica que entra naturalmente no sistema por meio das vazões.
+Energia hidrológica que entra naturalmente no sistema por meio das vazões.
 
-    Interpretação:
+Interpretação:
 
-    - **ENA alta** → tendência de alívio hidrológico  
-    - **ENA baixa** → aumento do risco de escassez
-    """)
+- **ENA alta** → tendência de alívio hidrológico  
+- **ENA baixa** → aumento do risco de escassez
+""")
 
             st.warning("Interprete sempre IPR e ISR junto com o curtailment para distinguir excesso renovável de restrições elétricas.")
 
         with st.expander("💰 4) Decomposição Econômica do Sistema", expanded=False):
             st.markdown("""
-    A plataforma separa o custo horário do sistema em três componentes econômicos.
+A plataforma separa o custo horário do sistema em componentes econômicos.
 
-    ### Estrutura central
+### Estrutura central
 
-    `T_total = T_hidro + T_elétrico + T_prudência`
+`T_total = T_elétrico + T_hidro + T_prudência + T_sistêmica`
 
-    onde:
+onde:
 
-    **T_hidro — Custo Hidrológico**
+**T_elétrico — Custo Estrutural de Geração**
 
-    Valor econômico associado ao uso ou preservação da água dos reservatórios.
+Representa o custo mínimo necessário para atender a carga considerando o despacho por mérito econômico.
 
-    A água funciona como um **ativo energético armazenável**.
+Principal componente:
 
-    ---
+`Térmica por mérito × CVU médio`
 
-    **T_elétrico — Custo Estrutural**
+---
 
-    Custo mínimo necessário para atender a carga considerando a estrutura da matriz elétrica.
+**T_hidro — Custo Hidrológico**
 
-    Inclui principalmente:
+Valor econômico associado ao uso da água armazenada.
 
-    - geração térmica por mérito
-    - geração inflexível
-    - características estruturais do sistema
+A água funciona como um **ativo energético armazenável**, cujo valor é aproximado pelo **CMO**.
 
-    ---
+---
 
-    **T_prudência — Custo de Decisão Operativa**
+**T_prudência — Custo de Decisão Operativa**
 
-    Custo adicional associado a decisões conservadoras de operação.
+Representa o custo adicional associado a decisões conservadoras do operador, como:
 
-    Pode surgir quando o operador:
+- preservação de reservatórios
+- despacho térmico preventivo
+- restrições operativas
 
-    - preserva reservatórios
-    - mantém geração térmica adicional
-    - restringe geração renovável
-    - prioriza segurança elétrica do sistema
+---
 
-    **Custo da Prudência**
+**T_sistêmica — Ajuste Estrutural do Sistema**
 
-    representa o **valor adicional pago hoje para preservar flexibilidade energética futura**.
-    """)
+Captura diferenças entre o valor econômico do mercado e o custo físico da geração.
+
+Pode assumir valores positivos ou negativos dependendo da condição estrutural do sistema.
+""")
 
         with st.expander("🛡️ 5) CVaR e Aversão ao Risco", expanded=False):
             st.markdown("""
-    O planejamento da operação do sistema considera cenários hidrológicos adversos.
+O planejamento da operação considera cenários hidrológicos adversos.
 
-    Para isso são utilizados mecanismos de **aversão ao risco**, como o **CVaR (Conditional Value at Risk)**.
+Para isso são utilizados mecanismos de **aversão ao risco**, como o **CVaR (Conditional Value at Risk)**.
 
-    Exemplo de calibração utilizada no setor:
+Exemplo de parametrização usada no setor:
 
-    `(15%, 40%)`
+`(15%, 40%)`
 
-    significando:
+significando:
 
-    - análise dos **15% piores cenários hidrológicos**
-    - com **peso de 40%** na decisão operativa
+- análise dos **15% piores cenários hidrológicos**
+- com **peso de 40% na decisão operativa**
 
-    Quanto maior a aversão ao risco:
+Maior aversão ao risco tende a produzir:
 
-    - maior tendência de preservação hídrica
-    - maior despacho térmico
-    - maior pressão sobre o PLD
+- maior preservação hídrica
+- maior despacho térmico
+- maior pressão sobre o PLD
 
-    ### CVaR Implícito Observado
+### CVaR Implícito Observado
 
-    Na plataforma estimamos um valor aproximado da aversão ao risco observada:
+A plataforma estima uma aproximação do valor implícito da aversão ao risco:
 
-    `CVaR_implícito = PLD − CMO dominante`
-    """)
+`CVaR_implícito = max(PLD − CMO, 0)`
+
+Quando o **PLD atinge o teto regulatório**, o valor implícito não é observável diretamente.
+""")
 
         with st.expander("📉 6) Risk Aversion Gap", expanded=False):
             st.markdown("""
-    O **Risk Aversion Gap** compara o nível de aversão ao risco observado com o custo médio da geração térmica.
+O **Risk Aversion Gap** compara o nível de aversão ao risco observado com o custo médio da geração térmica.
 
-    **Definição**
+**Definição**
 
-    `Risk Gap = CVaR_implícito − CVU_médio`
+`Risk Gap = CVaR_implícito − CVU_médio`
 
-    **Interpretação**
+**Interpretação**
 
-    - **positivo** → operação conservadora  
-    - **próximo de zero** → operação neutra  
-    - **negativo** → sistema em regime de abundância energética
-    """)
+- **positivo** → operação conservadora  
+- **próximo de zero** → operação neutra  
+- **negativo** → sistema em regime de abundância energética
+""")
 
         with st.expander("💧 7) Teste de Necessidade Hidráulica", expanded=False):
             st.markdown("""
-    Esse teste avalia quanto da geração hidráulica é **estruturalmente necessária** para atender a demanda.
+Esse teste avalia quanto da geração hidráulica é **estruturalmente necessária** para atender a demanda.
 
-    ### Passo 1 — Geração mandatória
+### Passo 1 — Geração mandatória
 
-    `Renováveis + Nuclear + Térmica Inflexível`
+`Renováveis + Nuclear + Térmica Inflexível`
 
-    ### Passo 2 — Hidro necessária
+### Passo 2 — Hidro necessária
 
-    `Hidro_necessária = Carga − Geração_mandatória`
+`Hidro_necessária = Carga − Geração_mandatória`
 
-    ### Passo 3 — Comparação com a geração observada
+### Passo 3 — Comparação com a geração observada
 
-    - `Hidro observada > Hidro necessária`  
-    → sistema com forte presença hidráulica
+- `Hidro observada > Hidro necessária`  
+→ sistema com forte presença hidráulica
 
-    - `Hidro observada < Hidro necessária`  
-    → maior dependência térmica
-    """)
+- `Hidro observada < Hidro necessária`  
+→ maior dependência térmica
+""")
 
         with st.expander("🧾 8) Custo Econômico do SIN (R$/h)", expanded=False):
             st.markdown("""
-    A exposição econômica total do sistema pode ser aproximada por:
+A exposição econômica total do sistema pode ser aproximada por:
 
-    `Custo SIN = Carga × PLD`
+`Custo SIN = Carga × PLD`
 
-    Esse valor representa o **sinal econômico agregado de liquidação do mercado naquela hora**.
+Esse valor representa o **valor econômico da energia liquidada no mercado** naquela hora.
 
-    Ele não corresponde ao custo físico real de produção, mas ao **valor econômico da energia transacionada**.
-    """)
+Ele não corresponde diretamente ao custo físico de geração.
+""")
 
-        with st.expander("🔋 9) Curtailment como Armazenamento Hidráulico Implícito", expanded=False):
+        with st.expander("📊 9) Infra-Marginal Rent", expanded=False):
             st.markdown("""
-    Quando geração solar ou eólica entra no sistema e **reduz o despacho hidráulico**, parte da água permanece armazenada.
+Chamamos de **Infra-Marginal Rent** a diferença entre:
 
-    Nesse sentido, renováveis funcionam como um tipo de:
+`Valor econômico da energia`  
+e  
+`Custo físico estimado de produção`.
 
-    **armazenamento hidráulico virtual**
+Na plataforma:
 
-    pois deslocam geração hidráulica para o futuro.
+`Infra_marginal = Custo SIN − T_total`
 
-    Uma estimativa simplificada do valor desse efeito pode ser expressa como:
+### Interpretação
 
-    `Hidro evitada × CMO`
-    """)
+**Infra-marginal positivo**
 
-        with st.expander("🏷️ 10) Classificação Operativa do SIN", expanded=False):
+O valor pago pelo mercado é maior que o custo físico de geração.
+
+Isso ocorre tipicamente quando:
+
+- o PLD é definido por usinas marginais caras
+- grande parte da geração vem de fontes mais baratas (hidro, renováveis)
+
+Nesse caso, **geradores recebem renda infra-marginal**.
+
+---
+
+**Infra-marginal negativo**
+
+O valor econômico do mercado é inferior ao custo físico estimado.
+
+Isso ocorre em situações como:
+
+- excesso estrutural de oferta
+- saturação renovável
+- PLD muito baixo
+
+Nesse caso, o sistema está operando com **sinais de preço comprimidos**.
+""")
+
+        with st.expander("🌡️ 10) Heatmap de Infra-Marginal ao Longo do Tempo", expanded=False):
             st.markdown("""
-    A plataforma classifica o estado do sistema em regimes operativos.
+O mapa de calor apresentado no dashboard mostra a evolução histórica da diferença entre:
 
-    Exemplos:
+`Custo SIN` e `T_total`.
 
-    **Escassez Hidrológica**
+Cada célula representa **uma hora de operação do sistema**.
 
-    Baixo armazenamento e aumento da dependência térmica.
+Esse gráfico permite identificar **regimes estruturais de mercado**, como:
 
-    ---
+**Regime de escassez**
 
-    **Preservação Hídrica**
+PLD elevado e forte renda infra-marginal.
 
-    Estratégia deliberada de manter níveis de reservatórios.
+**Regime de abundância**
 
-    ---
+PLD baixo e compressão de receitas.
 
-    **Saturação Renovável**
+**Transições estruturais**
 
-    Excesso instantâneo de geração renovável em relação à capacidade de absorção do sistema.
+Mudanças de comportamento ao longo das estações hidrológicas ou da expansão renovável.
 
-    ---
+Por utilizar toda a base histórica disponível, o heatmap permite visualizar **padrões operativos recorrentes do SIN**.
+""")
 
-    **Stress Operativo**
-
-    Sinais simultâneos de risco físico e pressão econômica.
-
-    ---
-
-    **Equilíbrio Estrutural**
-
-    Operação estável, sem pressões relevantes sobre geração ou armazenamento.
-    """)
-
-        with st.expander("🧭 11) Como Interpretar o Dashboard", expanded=False):
+        with st.expander("🏷️ 11) Classificação Operativa do SIN", expanded=False):
             st.markdown("""
-    ### Roteiro sugerido de leitura
+A plataforma classifica o estado do sistema em regimes operativos.
 
-    1️⃣ selecione o período de análise  
-    2️⃣ observe os indicadores principais  
-    3️⃣ verifique o score de coerência operativa  
-    4️⃣ analise a decomposição econômica do sistema  
-    5️⃣ identifique causas de curtailment  
-    6️⃣ utilize a simulação BESS  
-    7️⃣ compare a resposta do sistema
+**Escassez Hidrológica**
 
-    ### Objetivo final
+Baixo armazenamento e maior dependência térmica.
 
-    Avaliar se o comportamento observado do **PLD** está **coerente com as condições físicas do SIN**.
-    """)
+---
 
-            st.success("Interpretação executiva: combine sempre sinais físicos (carga, geração, reservatórios) com sinais econômicos (PLD, CMO e custos).")
+**Preservação Hídrica**
+
+Estratégia deliberada de poupar reservatórios.
+
+---
+
+**Saturação Renovável**
+
+Excesso instantâneo de geração renovável.
+
+---
+
+**Stress Operativo**
+
+Sinais simultâneos de risco físico e pressão econômica.
+
+---
+
+**Equilíbrio Estrutural**
+
+Operação estável sem pressões relevantes.
+""")
+
+        with st.expander("🧭 12) Como Interpretar o Dashboard", expanded=False):
+            st.markdown("""
+### Roteiro sugerido de leitura
+
+1️⃣ selecione o período de análise  
+2️⃣ observe os indicadores principais  
+3️⃣ verifique o score de coerência operativa  
+4️⃣ analise a decomposição econômica  
+5️⃣ identifique causas de curtailment  
+6️⃣ observe o heatmap histórico  
+7️⃣ utilize a simulação BESS
+
+### Objetivo final
+
+Avaliar se o comportamento observado do **PLD** está **coerente com as condições físicas do SIN**.
+""")
+
+            st.success("Combine sempre sinais físicos (carga, geração, reservatórios) com sinais econômicos (PLD, CMO e custos).")
 
 if __name__ == "__main__":
     main()
