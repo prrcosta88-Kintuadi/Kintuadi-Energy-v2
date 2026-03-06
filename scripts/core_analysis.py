@@ -556,34 +556,28 @@ def _safe_corr(a: pd.Series, b: pd.Series, min_points: int = 24) -> Optional[flo
 
 
 def _ensure_tz_naive_index(series: pd.Series) -> pd.Series:
-    """Padroniza índice temporal para datetime naive e sem duplicatas."""
+    """Padroniza índice temporal para datetime naive sem alterar o horário."""
+    
     s = series.copy()
 
     try:
-        # Força índice temporal consistente mesmo com mistura tz-aware/tz-naive
-        idx = pd.to_datetime(s.index, errors="coerce", utc=True)
+        idx = pd.to_datetime(s.index, errors="coerce")
         s = s[~idx.isna()]
-        idx = idx[~idx.isna()].tz_localize(None)
-        s.index = idx
-    except Exception:
-        try:
-            if isinstance(s.index, pd.DatetimeIndex) and s.index.tz is not None:
-                s.index = s.index.tz_localize(None)
-        except Exception:
-            pass
+        idx = idx[~idx.isna()]
 
-    try:
-        if isinstance(s.index, pd.DatetimeIndex) and s.index.has_duplicates:
-            if pd.api.types.is_numeric_dtype(s):
-                s = s.groupby(level=0).mean().sort_index()
-            else:
-                s = s[~s.index.duplicated(keep="last")].sort_index()
-        elif isinstance(s.index, pd.DatetimeIndex):
-            s = s.sort_index()
+        if isinstance(idx, pd.DatetimeIndex) and idx.tz is not None:
+            idx = idx.tz_localize(None)
+
+        s.index = idx
     except Exception:
         pass
 
-    return s
+    try:
+        s = s[~s.index.duplicated(keep="last")]
+    except Exception:
+        pass
+
+    return s.sort_index()
 
 
 def _dataset_file(ds: Dict[str, Any]) -> Optional[str]:
@@ -778,62 +772,70 @@ def _load_capacidade_instalada_ativa_por_fonte(ons: Dict[str, Any]) -> Dict[str,
         con.close()
 
 
-def _load_disponibilidade_horaria(ons: Dict[str, Any]) -> pd.Series:
+def _load_disponibilidade_horaria() -> Dict[str, pd.Series]:
+    """Capacidade sincronizada horária por tipo de usina (UHE, UTE, UTN) e total."""
+    
+    out = {
+        "uhe": pd.Series(dtype=float),
+        "ute": pd.Series(dtype=float),
+        "utn": pd.Series(dtype=float),
+        "total": pd.Series(dtype=float),
+    }
+
     if duckdb is None:
-        return pd.Series(dtype=float)
+        return out
+
     con = _duckdb_connect()
     if con is None or not _duckdb_table_exists(con, "disponibilidade_usina"):
         if con is not None:
             con.close()
-        return pd.Series(dtype=float)
+        return out
+
     try:
+
         q = f"""
             SELECT
                 {_duckdb_date_expr('din_instante')} AS din_instante,
-                SUM(COALESCE({_duckdb_num_expr('val_dispoperacional')}, {_duckdb_num_expr('val_dispsincronizada')}, {_duckdb_num_expr('val_potenciainstalada')})) AS disp
+                UPPER(TRIM(CAST(id_tipousina AS VARCHAR))) AS tipousina,
+                {_duckdb_num_expr('val_dispsincronizada')} AS disp_sync
             FROM disponibilidade_usina
-            GROUP BY 1
-            HAVING din_instante IS NOT NULL
-            ORDER BY 1
+            WHERE {_duckdb_date_expr('din_instante')} IS NOT NULL
+              AND UPPER(TRIM(CAST(id_tipousina AS VARCHAR))) IN ('UHE','UTE','UTN')
         """
-        df = con.execute(q).fetchdf()
-        if df.empty:
-            return pd.Series(dtype=float)
-        s = pd.Series(df['disp'].values, index=pd.to_datetime(df['din_instante']))
-        return _normalize_power_to_mw(s).sort_index()
-    except Exception:
-        return pd.Series(dtype=float)
-    finally:
-        con.close()
 
-
-def _load_dispsincronizada_total_horaria() -> pd.Series:
-    """Soma horária de val_dispsincronizada (capacidade sincronizada total)."""
-    if duckdb is None:
-        return pd.Series(dtype=float)
-    con = _duckdb_connect()
-    if con is None or not _duckdb_table_exists(con, "disponibilidade_usina"):
-        if con is not None:
-            con.close()
-        return pd.Series(dtype=float)
-    try:
-        q = f"""
-            SELECT
-                {_duckdb_date_expr('din_instante')} AS din_instante,
-                SUM({_duckdb_num_expr('val_dispsincronizada')}) AS disp_sync
-            FROM disponibilidade_usina
-            WHERE UPPER(TRIM(CAST(id_tipousina AS VARCHAR))) IN ('UHE','UTE','UTN')
-            GROUP BY 1
-            HAVING din_instante IS NOT NULL AND disp_sync IS NOT NULL
-            ORDER BY 1
-        """
         df = con.execute(q).fetchdf()
+
         if df.empty:
-            return pd.Series(dtype=float)
-        s = pd.Series(df["disp_sync"].values, index=pd.to_datetime(df["din_instante"]))
-        return _ensure_tz_naive_index(_normalize_power_to_mw(s).astype(float).sort_index())
+            return out
+
+        df["din_instante"] = pd.to_datetime(df["din_instante"])
+
+        # separa tipos
+        uhe = df[df["tipousina"] == "UHE"]
+        ute = df[df["tipousina"] == "UTE"]
+        utn = df[df["tipousina"] == "UTN"]
+
+        if not uhe.empty:
+            s = uhe.groupby("din_instante")["disp_sync"].sum()
+            out["uhe"] = _ensure_tz_naive_index(_normalize_power_to_mw(s).astype(float).sort_index())
+
+        if not ute.empty:
+            s = ute.groupby("din_instante")["disp_sync"].sum()
+            out["ute"] = _ensure_tz_naive_index(_normalize_power_to_mw(s).astype(float).sort_index())
+
+        if not utn.empty:
+            s = utn.groupby("din_instante")["disp_sync"].sum()
+            out["utn"] = _ensure_tz_naive_index(_normalize_power_to_mw(s).astype(float).sort_index())
+
+        # TOTAL = soma de tudo
+        s_total = df.groupby("din_instante")["disp_sync"].sum()
+        out["total"] = _ensure_tz_naive_index(_normalize_power_to_mw(s_total).astype(float).sort_index())
+
+        return out
+
     except Exception:
-        return pd.Series(dtype=float)
+        return out
+
     finally:
         con.close()
 
@@ -1132,11 +1134,19 @@ def _compute_effective_availability_margin(
     if carga_sin_series.empty or carga_sin_series.mean() <= 0:
         return {"status": "indisponível"}
 
-    disponibilidade_h = _load_disponibilidade_horaria(ons)
-    if disponibilidade_h.empty:
+    disponibilidade_h = _load_disponibilidade_horaria()
+
+    if not isinstance(disponibilidade_h, dict) or not disponibilidade_h:
         return {"status": "indisponível"}
 
-    cap_disp_media = float(disponibilidade_h.mean()) if not disponibilidade_h.empty else None
+    disp_total = disponibilidade_h.get("total", pd.Series(dtype=float))
+
+    if not isinstance(disp_total, pd.Series) or disp_total.empty:
+        return {"status": "indisponível"}
+
+    cap_disp_media = None
+    if isinstance(disp_total, pd.Series) and not disp_total.empty:
+        cap_disp_media = float(disp_total.mean())
     carga_media = float(carga_sin_series.mean())
     if cap_disp_media is None or carga_media <= 0:
         return {"status": "indisponível"}
@@ -1185,7 +1195,8 @@ def _compute_advanced_cross_metrics(
 
     carga_sin = _ensure_tz_naive_index(_to_series(load.get("sin", {}).get("serie", []), "carga"))
     carga_sin_db = _load_carga_sin_horaria_duckdb()
-    if not carga_sin_db.empty:
+
+    if isinstance(carga_sin_db, pd.Series) and not carga_sin_db.empty:
         carga_sin = carga_sin_db
 
     solar_key = next((k for k in generation.keys() if any(t in _normalize_text_key(k) for t in ["solar", "fotov"])) , None)
@@ -1212,18 +1223,19 @@ def _compute_advanced_cross_metrics(
     if not tipos_db.get("nuclear", pd.Series(dtype=float)).empty:
         nuclear = _ensure_tz_naive_index(tipos_db["nuclear"])
 
-    total_key = "sin" if "sin" in generation else None
-    geracao_total = _ensure_tz_naive_index(_to_series(generation.get(total_key, {}).get("serie", []), "geracao")) if total_key else pd.Series(dtype=float)
+    gen_parts = []
 
-    if geracao_total.empty:
-        sin_parts = [
-            _to_series(v.get("serie", []), "geracao")
-            for k, v in generation.items()
-            if k.startswith("sin_")
-        ]
-        if sin_parts:
-            df_sum = pd.concat(sin_parts, axis=1).fillna(0)
-            geracao_total = _ensure_tz_naive_index(df_sum.sum(axis=1))
+    for s in [solar, eolica, termica, hidro, nuclear]:
+        if isinstance(s, pd.Series) and not s.empty:
+            gen_parts.append(s)
+
+    if gen_parts:
+        df_sum = pd.concat(gen_parts, axis=1)
+        geracao_total = _ensure_tz_naive_index(
+            df_sum.sum(axis=1, min_count=1)
+        )
+    else:
+        geracao_total = pd.Series(dtype=float)
 
     carga_liquida = pd.Series(dtype=float)
     horas_renovavel_gt_carga_liquida = None
@@ -1241,9 +1253,16 @@ def _compute_advanced_cross_metrics(
     isr_horario = pd.Series(dtype=float)
 
     restr_h = _load_renovavel_disponivel_restricao_horaria()
-    renov_disponivel_h = pd.Series(dtype=float)
-    if not restr_h.empty:
-        renov_disponivel_h = _ensure_tz_naive_index(pd.Series(restr_h["renov_disponivel"].values, index=pd.to_datetime(restr_h["instante"])))
+    if isinstance(restr_h, pd.DataFrame) and not restr_h.empty:
+        renov_disponivel_h = pd.Series(dtype=float)
+
+    if isinstance(restr_h, pd.DataFrame) and not restr_h.empty:
+        renov_disponivel_h = _ensure_tz_naive_index(
+            pd.Series(
+                restr_h["renov_disponivel"].values,
+                index=pd.to_datetime(restr_h["instante"])
+            )
+        )
 
     if not carga_sin.empty and not renov_disponivel_h.empty:
         df_ipr = pd.DataFrame({"renov_disp": renov_disponivel_h, "carga": carga_sin}).dropna()
@@ -1276,7 +1295,9 @@ def _compute_advanced_cross_metrics(
     capacidade_instalada_ativa_por_fonte = _load_capacidade_instalada_ativa_por_fonte(ons)
 
     # Capacidade disponível real / margem operativa real / stress operacional
-    capacidade_disp_h = _load_disponibilidade_horaria(ons)
+    capacidade_disp_h = _load_disponibilidade_horaria()
+    if isinstance(capacidade_disp_h, dict):
+        capacidade_disp_h = capacidade_disp_h.get("total", pd.Series(dtype=float))
     margem_operativa_media_mensal = None
     margem_operativa_p5_mensal = None
     stress_operacional_medio = None
@@ -1979,7 +2000,12 @@ def _compute_advanced_cross_metrics(
         thermal_merit = _ensure_tz_naive_index(gfom_comp.get("ordem_merito", pd.Series(dtype=float))) if not gfom_comp.empty else pd.Series(dtype=float)
 
         # Capacidade sincronizada total
-        disp_sync_total = _load_dispsincronizada_total_horaria()
+        disp = _load_disponibilidade_horaria()
+
+        disp_sync_uhe = disp.get("uhe", pd.Series(dtype=float))
+        disp_sync_ute = disp.get("ute", pd.Series(dtype=float))
+        disp_sync_utn = disp.get("utn", pd.Series(dtype=float))
+        disp_sync_total = disp.get("total", pd.Series(dtype=float))
 
         # Curtailment/renovável disponível horários
         curtailed_h = pd.Series(dtype=float)
@@ -2020,6 +2046,10 @@ def _compute_advanced_cross_metrics(
             df_e["thermal_inflex"] = pd.to_numeric(thermal_inflex.reindex(idx), errors="coerce")
             df_e["thermal_merit"] = pd.to_numeric(thermal_merit.reindex(idx), errors="coerce")
             df_e["disp_sync_total"] = pd.to_numeric(disp_sync_total.reindex(idx), errors="coerce")
+            df_e["disp_sync_uhe"] = pd.to_numeric(disp_sync_uhe.reindex(idx), errors="coerce")
+            df_e["disp_sync_ute"] = pd.to_numeric(disp_sync_ute.reindex(idx), errors="coerce")
+            df_e["disp_sync_utn"] = pd.to_numeric(disp_sync_utn.reindex(idx), errors="coerce")
+            df_e["geracao_total"] = pd.to_numeric(geracao_total.reindex(idx), errors="coerce")
             df_e["curtailed"] = pd.to_numeric(curtailed_h.reindex(idx), errors="coerce")
             df_e["avail_ren"] = pd.to_numeric(avail_ren_h.reindex(idx), errors="coerce")
 
@@ -2051,7 +2081,7 @@ def _compute_advanced_cross_metrics(
             df_e["Thermal_inflex_ratio"] = (df_e["thermal_inflex"] / df_e["thermal_total"].replace(0, np.nan)).clip(lower=0, upper=1)
 
             # Step 2-10
-            df_e["SIN_cost_R$/h"] = df_e["load"] * df_e["pld"]
+            df_e["SIN_cost_R$/h"] = df_e["geracao_total"] * df_e["pld"]
             df_e["thermal_real_cost"] = df_e["thermal_total"] * df_e["cvu_semana"]
             df_e["thermal_merit_cost"] = df_e["thermal_merit"] * df_e["cvu_semana"]
             df_e["thermal_prudential_dispatch"] = df_e["thermal_total"] - df_e["thermal_merit"]
@@ -2066,18 +2096,25 @@ def _compute_advanced_cross_metrics(
                 np.where(df_e["Hydro_gap"].abs() <= tol, "Hydro Necessary", "Hydro Deficit"),
             )
 
-            df_e["Hydro_preserved"] = (df_e["required_hydro"] - df_e["hydro"]).clip(lower=0)
-            df_e["Water_value_R$/h"] = df_e["Hydro_preserved"] * df_e["pld"]
+            df_e["Hydro_preserved"] = (df_e["disp_sync_uhe"] - df_e["hydro"])
+            df_e["Water_value_R$/h"] = df_e["Hydro_preserved"] * df_e["cmo"]
             df_e["Curtailment_loss_R$/h"] = df_e["curtailed"] * df_e["pld"]
             df_e["avoidable_curtailment"] = df_e["curtailed"] * (1 - df_e["Thermal_inflex_ratio"].fillna(1))
-
             df_e["CVaR_implicit"] = (df_e["pld"] - df_e["cmo"]).clip(lower=0)
             df_e["Risk_Aversion_Gap"] = df_e["CVaR_implicit"] - df_e["cvu_semana"]
-            df_e["T_prudencia"] = df_e["thermal_prudential_dispatch"] * (df_e["cvu_semana"] - df_e["pld"])
-
+            df_e["T_prudencia"] = np.where(
+                df_e["cmo"] > df_e["pld"],
+                df_e["Hydro_preserved"] * (df_e["cmo"] - df_e["pld"]),
+                df_e["Hydro_preserved"] * 0
+            )
             df_e["T_total"] = df_e["SIN_cost_R$/h"]
             df_e["T_eletric"] = df_e["thermal_merit_cost"]
             df_e["T_hidro"] = df_e["Water_value_R$/h"]
+            df_e["T_sistemica"] = np.where(
+                    df_e["cmo"] > df_e["pld"],
+                    df_e["geracao_total"] * (df_e["cmo"] - df_e["pld"]),
+                    df_e["geracao_total"] * (df_e["pld"] - df_e["cmo"])
+            )
 
             economic = {
                 "dominant_submarket": dominant_sm,
@@ -2089,6 +2126,10 @@ def _compute_advanced_cross_metrics(
                     "Thermal_inflex_ratio": _series_to_hourly_dict(df_e["Thermal_inflex_ratio"]),
                 },
                 "sin_cost_hourly": _series_to_hourly_dict(df_e["SIN_cost_R$/h"], ndigits=4),
+                "disp_sync_uhe_hourly": _series_to_hourly_dict(df_e["disp_sync_uhe"], ndigits=4),
+                "geracao_total_hourly": _series_to_hourly_dict(df_e["geracao_total"], ndigits=4),
+                "pld_hourly": _series_to_hourly_dict(df_e["pld"], ndigits=4),
+                "cmo_hourly": _series_to_hourly_dict(df_e["cmo"], ndigits=4),
                 "thermal_real_cost_hourly": _series_to_hourly_dict(df_e["thermal_real_cost"], ndigits=4),
                 "thermal_merit_cost_hourly": _series_to_hourly_dict(df_e["thermal_merit_cost"], ndigits=4),
                 "thermal_prudential_dispatch_hourly": _series_to_hourly_dict(df_e["thermal_prudential_dispatch"], ndigits=4),
@@ -2102,6 +2143,7 @@ def _compute_advanced_cross_metrics(
                 "CVaR_implicit_hourly": _series_to_hourly_dict(df_e["CVaR_implicit"], ndigits=4),
                 "Risk_Aversion_Gap_hourly": _series_to_hourly_dict(df_e["Risk_Aversion_Gap"], ndigits=4),
                 "T_prudencia_hourly": _series_to_hourly_dict(df_e["T_prudencia"], ndigits=4),
+                "T_sistemica_hourly": _series_to_hourly_dict(df_e["T_sistemica"], ndigits=4),
                 "T_total_hourly": _series_to_hourly_dict(df_e["T_total"], ndigits=4),
                 "T_eletric_hourly": _series_to_hourly_dict(df_e["T_eletric"], ndigits=4),
                 "T_hidro_hourly": _series_to_hourly_dict(df_e["T_hidro"], ndigits=4),
