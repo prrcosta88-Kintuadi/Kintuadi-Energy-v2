@@ -15,55 +15,18 @@ import io
 JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/archive/refs/tags/MAATria-Energia.tar.gz"
 LOCAL_FILE = "data/core_analysis_latest.json"
 
+JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json"
+LOCAL_FILE = "data/core_analysis_latest.json"
+
 @st.cache_data
 def _load_core():
     if not os.path.exists(LOCAL_FILE):
-        try:
-            r = requests.get(JSON_URL, timeout=30)
-            r.raise_for_status()
-            
-            # Criar pasta se não existir
-            os.makedirs(Path(LOCAL_FILE).parent, exist_ok=True)
-            
-            if JSON_URL.endswith('.7z'):
-                # Se for .7z, descompactar
-                import py7zr
-                with py7zr.SevenZipFile(io.BytesIO(r.content), 'r') as archive:
-                    archive.extractall(path='data/')
-            
-            elif JSON_URL.endswith('.gz'):
-                # Se for .gz, descompactar
-                with gzip.open(io.BytesIO(r.content), 'rt', encoding='utf-8') as f:
-                    data = json.load(f)
-                with open(LOCAL_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(data, f)
-            
-            else:
-                # Tentar detectar se está em gzip pelo magic number
-                if r.content[:2] == b'\x1f\x8b':  # Magic number do gzip
-                    with gzip.open(io.BytesIO(r.content), 'rt', encoding='utf-8') as f:
-                        data = json.load(f)
-                    with open(LOCAL_FILE, 'w', encoding='utf-8') as f:
-                        json.dump(data, f)
-                else:
-                    # Se for JSON direto
-                    with open(LOCAL_FILE, "wb") as f:
-                        f.write(r.content)
-        
-        except Exception as e:
-            st.error(f"Erro ao baixar o arquivo: {e}")
-            import traceback
-            traceback.print_exc()
-            return {}
+        r = requests.get(JSON_URL)
+        with open(LOCAL_FILE, "wb") as f:
+            f.write(r.content)
 
-    try:
-        with open(LOCAL_FILE, encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        st.error(f"Erro ao carregar JSON: {e}")
-        import traceback
-        traceback.print_exc()
-        return {}
+    with open(LOCAL_FILE) as f:
+        return json.load(f)
 
 #@st.cache_data
 #def _load_core() -> Dict[str, Any]:
