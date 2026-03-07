@@ -11,27 +11,27 @@ import streamlit as st
 import requests
 import gzip
 
-CORE_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json"
 
-@st.cache_data(ttl=3600)
-def _load_core() -> Dict[str, Any]:
+JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json"
+LOCAL_FILE = "data/core_analysis_latest.json"
 
-    # 1️⃣ tenta carregar localmente (modo desenvolvimento)
-    for p in [Path("data/core_analysis_latest.json"), Path("core_analysis_latest.json")]:
-        if p.exists():
-            with p.open("r", encoding="utf-8") as f:
-                return json.load(f)
+def load_core():
+    if not os.path.exists(LOCAL_FILE):
+        r = requests.get(JSON_URL)
+        with open(LOCAL_FILE, "wb") as f:
+            f.write(r.content)
 
-    # 2️⃣ fallback → baixar do GitHub Release
-    try:
-        r = requests.get(CORE_URL, timeout=30000)
-        r.raise_for_status()
-        return r.json()
+    with open(LOCAL_FILE) as f:
+        return json.load(f)
 
-    except Exception as e:
-        st.error(f"Erro ao carregar core_analysis: {e}")
+#@st.cache_data
+#def _load_core() -> Dict[str, Any]:
+#    for p in [Path("data/core_analysis_latest.json"), Path("core_analysis_latest.json")]:
+#        if p.exists():
+#            with p.open("r", encoding="utf-8") as f:
+#                return json.load(f)
+#    return {}
 
-    return {}
 
 def _series_from_hourly(d: Dict[str, Any], name: str) -> pd.Series:
     if not isinstance(d, dict) or not d:
