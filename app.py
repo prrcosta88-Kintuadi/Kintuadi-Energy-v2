@@ -15,31 +15,22 @@ import gzip
 JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json"
 LOCAL_FILE = "data/core_analysis_latest.json"
 
-
 def _load_core():
-
-    os.makedirs("data", exist_ok=True)
-
     if not os.path.exists(LOCAL_FILE):
-
-        r = requests.get(JSON_URL, stream=True, timeout=600)
-        r.raise_for_status()
-
+        r = requests.get(JSON_URL)
         with open(LOCAL_FILE, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024*1024):
-                if chunk:
-                    f.write(chunk)
+            f.write(r.content)
 
-    with open(LOCAL_FILE, "r", encoding="utf-8") as f:
+    with open(LOCAL_FILE) as f:
         return json.load(f)
 
-
-@st.cache_data(show_spinner=True)
-def load_core():
-    return _load_core()
-
-
-core = load_core()
+#@st.cache_data
+#def _load_core() -> Dict[str, Any]:
+#    for p in [Path("data/core_analysis_latest.json"), Path("core_analysis_latest.json")]:
+#        if p.exists():
+#            with p.open("r", encoding="utf-8") as f:
+#                return json.load(f)
+#    return {}
 
 
 def _series_from_hourly(d: Dict[str, Any], name: str) -> pd.Series:
@@ -572,7 +563,6 @@ def main():
                 pdf,
                 x="instante",
                 y=decomp_cols,
-                labels={"value": "Valor (R$)", "variable": "Componente", **label_map},
                 template="plotly_dark",
                 barmode="stack"
             )
@@ -592,11 +582,7 @@ def main():
         if {"thermal", "thermal_prudential_dispatch"}.issubset(dff.columns):
             g2 = _plot_df(dff[["thermal", "thermal_prudential_dispatch"]])
             thermal_labels = {
-            thermal_labels = {
-                "thermal": "Geração Térmica Total", 
-                "thermal_prudential_dispatch": "Geração Térmica Prudencial",
-                "value": "Potência (MWmed)",
-                "variable": "Tipo de Geração"
+            "thermal": "Geração Térmica Total", "thermal_prudential_dispatch": "Geração Térmica Prudencial"
             }
             fig2 = px.line(g2, x="instante", y=["thermal", "thermal_prudential_dispatch"], template="plotly_dark", labels=thermal_labels)
             fig2.update_layout(title="Despacho térmico total vs despacho prudencial (MWmed)")
@@ -678,27 +664,15 @@ def main():
         cols = [c for c in ["curtail_solar", "curtail_wind", "curtail_total"] if c in cdf.columns]
         if cols:
             st.caption("Montagem: curtailment horário por fonte (solar/eólica) e total agregado.")
-            # Dicionário com os nomes das colunas e seus rótulos
-            curtail_labels = {
-                "curtail_solar": "Curtailment Solar",
-                "curtail_wind": "Curtailment Eólico",
-                "curtail_total": "Curtailment Total",
-                "value": "Potência (MWmed)",
-                "variable": "Fonte"
-            }
+            fig = go.Figure()
             fig = px.bar(
-                cdf,  # Corrigido: estava 'pdf' mas deveria ser 'cdf'
+                pdf,
                 x="instante",
                 y=["curtail_solar", "curtail_wind"],
                 template="plotly_dark",
-                barmode="stack",
-                labels=curtail_labels  # Adicionando os labels renomeados
+                barmode="stack"
             )
-            fig.update_layout(
-                title="Curtailment horário por fonte (MWmed)",
-                yaxis_title="Potência (MWmed)",
-                xaxis_title="Instante"
-            )
+            #fig = px.bar(cdf, x="instante", y=cols, template="plotly_dark", barmode="group")
             st.plotly_chart(fig, width="stretch")
             with st.expander("Ver dados do gráfico (hora a hora)"):
                 st.dataframe(cdf[["instante"] + cols], width="stretch", height=280)
