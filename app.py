@@ -18,14 +18,29 @@ LOCAL_FILE = "data/core_analysis_latest.json"
 @st.cache_data
 def _load_core():
     if not os.path.exists(LOCAL_FILE):
-        r = requests.get(JSON_URL)
-        with gzip.open(io.BytesIO(r.content), 'rt') as f:
-            data = json.load(f)
-        with open(LOCAL_FILE, 'w') as f:
-            json.dump(data, f)
-    
-    with open(LOCAL_FILE) as f:
-        return json.load(f)
+        try:
+            r = requests.get(JSON_URL, timeout=30)
+            r.raise_for_status()
+            
+            if JSON_URL.endswith('.7z'):
+                # Se for .7z, descompactar
+                import py7zr
+                with py7zr.SevenZipFile(io.BytesIO(r.content), 'r') as archive:
+                    archive.extractall(path='data/')
+            else:
+                # Se for JSON direto
+                with open(LOCAL_FILE, "wb") as f:
+                    f.write(r.content)
+        except Exception as e:
+            st.error(f"Erro ao baixar o arquivo: {e}")
+            return {}
+
+    try:
+        with open(LOCAL_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        st.error(f"Erro ao carregar JSON: {e}")
+        return {}
 
 #@st.cache_data
 #def _load_core() -> Dict[str, Any]:
