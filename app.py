@@ -15,13 +15,14 @@ import gzip
 JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json"
 LOCAL_FILE = "data/core_analysis_latest.json"
 
+
 def _load_core():
 
     os.makedirs("data", exist_ok=True)
 
     if not os.path.exists(LOCAL_FILE):
 
-        r = requests.get(JSON_URL, stream=True)
+        r = requests.get(JSON_URL, stream=True, timeout=600)
         r.raise_for_status()
 
         with open(LOCAL_FILE, "wb") as f:
@@ -31,6 +32,14 @@ def _load_core():
 
     with open(LOCAL_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+@st.cache_data(show_spinner=True)
+def load_core():
+    return _load_core()
+
+
+core = load_core()
 
 
 def _series_from_hourly(d: Dict[str, Any], name: str) -> pd.Series:
