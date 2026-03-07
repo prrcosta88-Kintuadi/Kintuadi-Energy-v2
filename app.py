@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import requests
 import gzip
+import io
 
 JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/archive/refs/tags/MAATria-Energia.tar.gz"
 LOCAL_FILE = "data/core_analysis_latest.json"
