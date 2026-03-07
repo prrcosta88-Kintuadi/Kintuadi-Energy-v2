@@ -6,10 +6,7 @@ data/**/*.csv
 *.pkl
 
 # JSON: versionar somente consolidados necessários para deploy
-*.json
-!data/kintuadi_raw_*.json
-!data/kintuadi_latest.json
-!data/core_analysis_latest.json
+
 
 # Credenciais
 .env
