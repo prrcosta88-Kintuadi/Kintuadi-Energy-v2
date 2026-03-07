@@ -11,15 +11,18 @@ import streamlit as st
 import requests
 import gzip
 
-JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json"
+JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json.gz"
 LOCAL_FILE = "data/core_analysis_latest.json"
+
 @st.cache_data
 def _load_core():
     if not os.path.exists(LOCAL_FILE):
         r = requests.get(JSON_URL)
-        with open(LOCAL_FILE, "wb") as f:
-            f.write(r.content)
-
+        with gzip.open(io.BytesIO(r.content), 'rt') as f:
+            data = json.load(f)
+        with open(LOCAL_FILE, 'w') as f:
+            json.dump(data, f)
+    
     with open(LOCAL_FILE) as f:
         return json.load(f)
 
