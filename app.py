@@ -16,21 +16,21 @@ JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/d
 LOCAL_FILE = "data/core_analysis_latest.json"
 
 def _load_core():
+
+    os.makedirs("data", exist_ok=True)
+
     if not os.path.exists(LOCAL_FILE):
-        r = requests.get(JSON_URL)
+
+        r = requests.get(JSON_URL, stream=True)
+        r.raise_for_status()
+
         with open(LOCAL_FILE, "wb") as f:
-            f.write(r.content)
+            for chunk in r.iter_content(chunk_size=1024*1024):
+                if chunk:
+                    f.write(chunk)
 
-    with open(LOCAL_FILE) as f:
+    with open(LOCAL_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
-
-#@st.cache_data
-#def _load_core() -> Dict[str, Any]:
-#    for p in [Path("data/core_analysis_latest.json"), Path("core_analysis_latest.json")]:
-#        if p.exists():
-#            with p.open("r", encoding="utf-8") as f:
-#                return json.load(f)
-#    return {}
 
 
 def _series_from_hourly(d: Dict[str, Any], name: str) -> pd.Series:
