@@ -14,7 +14,7 @@ import gzip
 
 JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json"
 LOCAL_FILE = "data/core_analysis_latest.json"
-
+@st.cache_data
 def _load_core():
     if not os.path.exists(LOCAL_FILE):
         r = requests.get(JSON_URL)
