@@ -572,6 +572,7 @@ def main():
                 pdf,
                 x="instante",
                 y=decomp_cols,
+                labels={"value": "Valor (R$)", "variable": "Componente", **label_map},
                 template="plotly_dark",
                 barmode="stack"
             )
@@ -591,7 +592,11 @@ def main():
         if {"thermal", "thermal_prudential_dispatch"}.issubset(dff.columns):
             g2 = _plot_df(dff[["thermal", "thermal_prudential_dispatch"]])
             thermal_labels = {
-            "thermal": "Geração Térmica Total", "thermal_prudential_dispatch": "Geração Térmica Prudencial"
+            thermal_labels = {
+                "thermal": "Geração Térmica Total", 
+                "thermal_prudential_dispatch": "Geração Térmica Prudencial",
+                "value": "Potência (MWmed)",
+                "variable": "Tipo de Geração"
             }
             fig2 = px.line(g2, x="instante", y=["thermal", "thermal_prudential_dispatch"], template="plotly_dark", labels=thermal_labels)
             fig2.update_layout(title="Despacho térmico total vs despacho prudencial (MWmed)")
@@ -673,15 +678,27 @@ def main():
         cols = [c for c in ["curtail_solar", "curtail_wind", "curtail_total"] if c in cdf.columns]
         if cols:
             st.caption("Montagem: curtailment horário por fonte (solar/eólica) e total agregado.")
-            fig = go.Figure()
+            # Dicionário com os nomes das colunas e seus rótulos
+            curtail_labels = {
+                "curtail_solar": "Curtailment Solar",
+                "curtail_wind": "Curtailment Eólico",
+                "curtail_total": "Curtailment Total",
+                "value": "Potência (MWmed)",
+                "variable": "Fonte"
+            }
             fig = px.bar(
-                pdf,
+                cdf,  # Corrigido: estava 'pdf' mas deveria ser 'cdf'
                 x="instante",
                 y=["curtail_solar", "curtail_wind"],
                 template="plotly_dark",
-                barmode="stack"
+                barmode="stack",
+                labels=curtail_labels  # Adicionando os labels renomeados
             )
-            #fig = px.bar(cdf, x="instante", y=cols, template="plotly_dark", barmode="group")
+            fig.update_layout(
+                title="Curtailment horário por fonte (MWmed)",
+                yaxis_title="Potência (MWmed)",
+                xaxis_title="Instante"
+            )
             st.plotly_chart(fig, width="stretch")
             with st.expander("Ver dados do gráfico (hora a hora)"):
                 st.dataframe(cdf[["instante"] + cols], width="stretch", height=280)
