@@ -2,8 +2,14 @@
 # Mantém artefatos brutos locais fora do git
 data/*.csv
 data/**/*.csv
+data/*.xlsx
+data/**/*.xlsx
+*.xlsx
 *.csv
 *.pkl
+*.duckdb
+data/*.duckdb
+data/**/*.duckdb
 
 # JSON: versionar somente consolidados necessários para deploy
 
