@@ -12,27 +12,31 @@ import requests
 import gzip
 import io
 
-JSON_URL = "https://github.com/prrcosta88-Kintuadi/Kintuadi-Energy-v2/releases/download/MAATria-Energia/core_analysis_latest.json"
-LOCAL_FILE = "data/core_analysis_latest.json"
-
 @st.cache_data
-def _load_core():
-    if not os.path.exists(LOCAL_FILE):
-        r = requests.get(JSON_URL)
-        with open(LOCAL_FILE, "wb") as f:
-            f.write(r.content)
+def _load_core() -> Dict[str, Any]:
 
-    with open(LOCAL_FILE) as f:
-        return json.load(f)
+    paths = [
+        Path("data/core_analysis_latest.json"),
+        Path("core_analysis_latest.json"),
+        Path("data/core_analysis_latest.json.gz"),
+        Path("core_analysis_latest.json.gz"),
+    ]
 
-#@st.cache_data
-#def _load_core() -> Dict[str, Any]:
-#    for p in [Path("data/core_analysis_latest.json"), Path("core_analysis_latest.json")]:
-#        if p.exists():
-#            with p.open("r", encoding="utf-8") as f:
-#                return json.load(f)
-#    return {}
+    for p in paths:
 
+        if p.exists():
+
+            # Caso seja gzip
+            if p.suffix == ".gz":
+                with gzip.open(p, "rt", encoding="utf-8") as f:
+                    return json.load(f)
+
+            # Caso seja json normal
+            else:
+                with p.open("r", encoding="utf-8") as f:
+                    return json.load(f)
+
+    return {}
 
 def _series_from_hourly(d: Dict[str, Any], name: str) -> pd.Series:
     if not isinstance(d, dict) or not d:
